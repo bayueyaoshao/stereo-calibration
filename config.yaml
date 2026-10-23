@@ -1,0 +1,49 @@
+# 双目相机标定生产工具的唯一参数来源(D-10)
+#
+# 硬性规则:
+# - 命令行不接受任何算法参数(仅可选 --config 指定本文件路径),所有默认值集中在本文件;
+# - 换数据集/换棋盘规格只改配置不改代码。
+
+# ---- 标定板规格(全局)----
+board:
+  board_type: "chessboard"             # 当前只支持棋盘格
+  cols: 11                             # 内部角点列数
+  rows: 8                              # 内部角点行数,11×8 = 88 个内部角点
+  square_size_mm: 25.0                 # 方格物理边长(决定外参平移尺度,不影响内参)
+  unit: "mm"
+
+# ---- 数据位置(相对当前工作目录)----
+data:
+  train: "data/train"                  # 训练图像:双层嵌套 <ts>/<ts>_<us>/cam{1,2}.jpg
+  test: "data/test"                    # 测试图像:同结构
+
+# ---- 输出(D-11)----
+output_root: "output"                  # 固定根目录,每次运行直接写入覆盖,不做时间戳版本化;
+                                       # 与 data/ 相等或互相包含的配置会在加载层被拒绝(防误删数据)
+
+# ---- 全局 ----
+cv2_threads: 0                         # OpenCV 内部线程数;0 = 关闭 OpenCV 自己的多线程,
+                                       # 防止批量处理时占满所有核(并行交给上层显式控制)
+
+# ---- 模块1:数据预处理(角点检测与筛选)----
+preprocess:
+  max_workers: 12                      # 并行进程数;1 = 串行调试(体例照参考工程)
+  corners:
+    # 经典检测器 findChessboardCorners 的选项(按名字开,代码内翻译成 cv2 常量):
+    # adaptive_thresh = 自适应阈值(光照不均时更稳);normalize_image = 先归一化亮度
+    classic_flags: [adaptive_thresh, normalize_image]
+    sb_flags: 0                        # 新款检测器 findChessboardCornersSB 的选项位掩码,0 = 默认
+    # SB 未检出的帧用经典检测器兜底(01-02 接入);每帧来源记在 npz 的 source 数组:
+    # "sb" = SB 本体检出,"classic" = SB 未检出、classic 兜底填入,"" = 均未检出
+    sb_fallback_classic: true
+    subpix:
+      # 亚像素精化(仅 classic 路线使用;SB 输出已亚像素,严禁二次精化)窗口粒度:
+      # frame = 每帧一个窗口(帧内方格像素边长中位数推导,默认);
+      # corner = 逐角点局部自适应(边缘强畸变处方格更小时用)
+      window_granularity: frame
+      min_win: 3                       # 半窗口下限(像素);窗口绝不允许 >= 方格像素边长(头号陷阱)
+      max_iter: 30                     # 精化迭代次数上限
+      epsilon: 0.01                    # 收敛容差:角点移动小于此值即停(像素)
+  copy_fail_originals: true            # D-02:失败帧原图拷贝到输出目录(fail_ 前缀)供人工复核(01-03 接入)
+  visualization:
+    jpeg_quality: 90                   # 角点标注图 JPEG 质量(01-03 接入)
