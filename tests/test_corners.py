@@ -14,7 +14,12 @@ import numpy as np
 import pytest
 
 from stereo_calib.corners.canonical import canonicalize
-from stereo_calib.corners.detect import detect_classic, detect_sb, grid_defects
+from stereo_calib.corners.detect import (
+    _window_ladder,
+    detect_classic,
+    detect_sb,
+    grid_defects,
+)
 from stereo_calib.corners.window import derive_window_frame, estimate_sq_px
 from stereo_calib.io.config import CornersConfig
 
@@ -162,6 +167,26 @@ def test_sb_and_classic_canonical_uv_agree(make_chessboard_image):
 
 
 # ---------- 缺陷闸门与窗口阶梯恢复(参考工程事故复盘的移植)----------
+
+@pytest.mark.parametrize("cap", [3, 4, 5, 6, 11, 12])
+def test_window_ladder_always_descends_to_three(cap):
+    """WR-01:任意 cap >= 3,窗口阶梯恒含下限 3、严格降序、顶格恰为 cap。
+
+    偶数 cap 时 range(cap, 2, -2) 不含 3,必须补上——漏 3 就是文档化
+    不变量「往下每级减 2 试到 3」被击穿,只会在窗口 3 才能恢复的帧上丢结果。
+    """
+    ladder = _window_ladder(cap)
+    assert ladder[0] == cap, f"阶梯顶格必须是 cap={cap},实际:{ladder}"
+    assert 3 in ladder, f"下限 3 必须恒在阶梯里(cap={cap} 实际:{ladder})"
+    assert all(a > b for a, b in zip(ladder, ladder[1:])), \
+        f"阶梯必须严格降序,实际:{ladder}"
+    assert min(ladder) == 3
+
+
+def test_window_ladder_exact_values_odd_unchanged_even_gets_three():
+    """精确值锁定:奇数 cap 输出与原实现逐字节一致;偶数 cap 补上 3。"""
+    assert _window_ladder(11) == [11, 9, 7, 5, 3]  # 奇数行为不变
+    assert _window_ladder(4) == [4, 3]             # 偶数补 3(原实现漏 3)
 
 def test_grid_defects_clean_grid_has_zero(make_chessboard_image):
     """干净网格(强侧转真值角点,间距本来就渐变)必须数出零缺陷:

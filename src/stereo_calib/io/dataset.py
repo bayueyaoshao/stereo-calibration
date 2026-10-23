@@ -4,7 +4,10 @@
 - data/{train,test}/<目录>/<组目录>/cam1.jpg + cam2.jpg
 - 组目录(group_id)= 叶子目录名,是后续"公共视场对"的配对键;
 - image_id = 叶子目录名 + "_cam{n}"——文件名 stem 全库只有 cam1/cam2 两个,
-  直接用 stem 必碰撞,绝不能用(Pitfall 3)。
+  直接用 stem 必碰撞,绝不能用(Pitfall 3);
+- 同名叶子目录出现在同划分不同父目录下:按「父/叶子」相对路径分组,成为
+  两个独立组,绝不静默合并;产生的同 image_id 由 scan_dataset 去重
+  (中文警告 + 跳过后出现者),不存在跨拍摄的双目错配(CR-01)。
 
 韧性规则(换数据集不崩不静默):
 - 划分目录不存在:中文警告 + 按 0 张处理(只有训练集是合法输入);
@@ -76,6 +79,12 @@ def _scan_split(split_dir: Path, split: str, warnings: list[str]) -> list[ImageR
 
     # 两层通配扫描(<目录>/<组目录>/cam*.jpg),容忍 <ts>/<ts>_<us> 嵌套,
     # 不硬编码层数语义;sorted 保证字典序稳定(时间戳目录名字典序 = 拍摄时间序)
+    # 分组键 = 组目录相对划分的「父/叶子」路径(CR-01):同划分不同父目录下的
+    # 同名叶子目录是两个独立组,绝不静默合并——若按叶子名合并,cam1/cam2 会
+    # 跨拍摄错配成毒对,直接污染 common_fov_pairs(Phase 3 双目标定输入)。
+    # 行为保持:当前数据叶子名全局唯一,路径键与原叶子名键产生完全相同的分组;
+    # 排序方面叶子名 <ts>_<us> 以父目录 <ts> 开头,键排序与原叶子名排序给出
+    # 相同记录顺序。
     by_leaf: dict[str, dict[int, Path]] = {}
     for jpg in sorted(split_dir.glob("*/*/cam*.jpg")):
         m = _CAM_STEM.match(jpg.stem)
@@ -85,11 +94,12 @@ def _scan_split(split_dir: Path, split: str, warnings: list[str]) -> list[ImageR
                 f"(双目两路,期望 cam1.jpg / cam2.jpg),已跳过:{jpg}"
             )
             continue
-        by_leaf.setdefault(jpg.parent.name, {})[int(m.group(1))] = jpg
+        key = jpg.parent.relative_to(split_dir).as_posix()
+        by_leaf.setdefault(key, {})[int(m.group(1))] = jpg
 
     # 空目录(或只有不合模式文件)也要点名,不让"少了一半数据"静默发生
     for d in sorted(split_dir.glob("*/*")):
-        if d.is_dir() and d.name not in by_leaf:
+        if d.is_dir() and d.relative_to(split_dir).as_posix() not in by_leaf:
             warnings.append(
                 f"组目录 {d} 里没有有效的 cam1.jpg/cam2.jpg(空目录或文件名不合模式),已跳过。"
             )
@@ -106,8 +116,9 @@ def _scan_split(split_dir: Path, split: str, warnings: list[str]) -> list[ImageR
             )
 
     records: list[ImageRecord] = []
-    for leaf in sorted(by_leaf):
-        for cam in sorted(by_leaf[leaf]):
+    for key in sorted(by_leaf):
+        leaf = Path(key).name  # 叶子名 = group_id / image_id 前缀(配对键契约,绝不变)
+        for cam in sorted(by_leaf[key]):
             image_id = f"{leaf}_cam{cam}"
             if not _SAFE_IMAGE_ID.match(image_id) or image_id in {".", ".."}:
                 warnings.append(
@@ -116,7 +127,7 @@ def _scan_split(split_dir: Path, split: str, warnings: list[str]) -> list[ImageR
                 )
                 continue
             records.append(ImageRecord(
-                image_id=image_id, path=by_leaf[leaf][cam],
+                image_id=image_id, path=by_leaf[key][cam],
                 split=split, cam=cam, group_id=leaf,
             ))
     return records
@@ -126,6 +137,8 @@ def scan_dataset(data_cfg: DataDirs) -> ScanResult:
     """按配置扫描 data.train / data.test 两个划分,返回记录 + 警告清单。
 
     image_id 全库唯一(叶子目录重名会撞编号):重复记中文警告并跳过后出现者。
+    同划分不同父目录下的同名叶子目录按「父/叶子」路径分为独立组,产生的
+    同 image_id 同样在此去重(警告 + 跳过后出现者),绝不静默合并组。
     两个划分都扫不出任何记录:抛中文 ValueError(数据没就位不是可继续状态)。
     """
     warnings: list[str] = []

@@ -77,6 +77,20 @@ def detect_one(task: tuple) -> dict:
             "group_id": group_id, "split": split, "result": result}
 
 
+def _fail_reason(error: BaseException) -> str:
+    """TaskFailed 信封 → fail 清单的 reason 标签(按异常类型区分,WR-02)。
+
+    imread_checked 的读图 ValueError(消息含「照片读取失败」)按「读图失败」
+    标注;其余 worker 异常(derive_window_frame 的窗口断言 AssertionError、
+    检测器 cv2.error、传输/序列化错误等)按「检测失败(异常类型名)」诚实
+    标注——原始报错文本两种情况都完整保留,D-02 人工复核不再被一律指向
+    「读图」而去找错地方。
+    """
+    if isinstance(error, ValueError) and "照片读取失败" in str(error):
+        return f"读图失败:{error}"
+    return f"检测失败({type(error).__name__}):{error}"
+
+
 def _new_slot(records: list, n_corners: int) -> dict:
     """预分配一个 (split, cam) 组的带掩码稠密数组与清单行容器。
 
@@ -167,8 +181,9 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
         consumed += 1
         slot, j, rec = slot_of[task[0]]
         if isinstance(outcome, TaskFailed):
-            # 拆信封:该帧记 fail,绝不重抛(单帧坏图只废它自己)
-            _record_fail(slot, rec, f"读图失败:{outcome.error}")
+            # 拆信封:该帧记 fail,绝不重抛(单帧坏图只废它自己);
+            # 标签按异常类型区分(_fail_reason),原始报错文本完整保留
+            _record_fail(slot, rec, _fail_reason(outcome.error))
             continue
         result = outcome["result"]
         if result is None:
