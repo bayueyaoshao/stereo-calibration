@@ -577,6 +577,35 @@ def test_run_stereo_e2e_synthetic_full_contract(tmp_path, monkeypatch):
     assert not (out / "stale_from_last_run.txt").exists(), "重跑必须清掉上次残留"
 
 
+def test_run_stereo_joint_enabled_fail_closed(tmp_path, monkeypatch):
+    """CR-01 回归:stereo.joint.enabled=true 必须被 run_stereo 入口的
+    fail-closed 硬门拦下(中文 ValueError,收口进 CLI 异常网),绝不静默
+    跑 rigid 路径(fail-open);拦截发生在目录清理之前——output/stereo
+    既有内容原样保留,绝不制造「joint 已生效」的运行假象。"""
+    from stereo_calib.io.config import load_config
+    from stereo_calib.stereo.pipeline import run_stereo
+
+    cfg_path, _s_train, _s_test = _stereo_e2e_env(tmp_path)
+    # 出厂配置注入 enabled: true(模拟操作员按旧注释把开关打开)
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "  exclude_pairs: []\n" in text
+    cfg_path.write_text(
+        text.replace("  exclude_pairs: []\n",
+                     "  exclude_pairs: []\n"
+                     "  joint:\n"
+                     "    enabled: true\n"),
+        encoding="utf-8")
+    stale = tmp_path / "output" / "stereo" / "previous_run.md"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("上次运行残留", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=r"joint\.enabled=true 不合法"):
+        run_stereo(load_config(cfg_path))
+    assert stale.exists(), (
+        "fail-closed 硬门必须先于目录清理触发:拦截时既有产物原样保留,"
+        "不得被 rmtree 抹掉(否则像「跑过一轮」)")
+
+
 def test_run_stereo_outlier_rejection_and_test_marking(tmp_path, monkeypatch):
     """离群行为:train 1 对注入逐点散斑(恒定偏移会被该对位姿吸收——
     test_intrinsic_pipeline 同款教训,故用散斑)→ 恰被剔除一轮收敛留痕;

@@ -160,6 +160,21 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
     stereo = cfg.stereo
     stereo_root = Path(cfg.output_root) / "stereo"
 
+    # ---- fail-closed 硬门(CR-01):joint.enabled 当前没有生产消费者 ----
+    # 联合 BA 引擎(joint.py)已交付,但生产接线(03-05 Task 3,评估链接线
+    # + 24 键契约)因三变体裁决失败按失败协议跳过——run_stereo 全文不读
+    # joint 子段,开关置 true 只会静默跑 rigid 路径(fail-open),违反本
+    # 工程「不静默」红线(Pitfall 8)。此处硬拦:中文 ValueError 收口进
+    # CLI 异常网(退出码 1),且发生在目录清理之前——既有产物原样保留,
+    # 绝不制造「joint 已生效」的运行假象。接线任务落地后才允许打开
+    # (deferred-items.md 已登记追踪)。
+    if stereo.joint.enabled:
+        raise ValueError(
+            "stereo.joint.enabled=true 不合法:联合 BA 引擎已交付但生产接线"
+            "(03-05 Task 3,评估链接线 + 24 键契约)因三变体裁决失败按失败"
+            "协议跳过,当前开关没有任何消费者——置 true 只会静默跑 rigid "
+            "路径。请保持 enabled: false,等待接线任务落地。")
+
     # ---- 运行前清理(D-11 固定覆盖 + 防残留,照 Phase 2 体例)----
     # 只删 output_root/stereo 一个产物子目录,删后随落盘按需重建;上次运行
     # 的 JSON/npz/CSV/报告残留不会误导人工复核。output_root 本身与其他未知

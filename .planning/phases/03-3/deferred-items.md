@@ -23,3 +23,33 @@
   (`45a6b75` / `df044e0` 之后无改动),按 Scope Boundary 不修。
 - **本计划侧状态:** 03-03 全部新建/改动文件 ruff 干净;全量测试 191 passed。
 
+### 2026-10-24 · phase-03 code review(CR-01/IN-06)· joint 生产接线缺口(跨 wave 追踪)
+
+- **来源:** `.planning/phases/03-3/03-REVIEW.md` CR-01 + IN-06;03-05 Task 3/4
+  (评估链接线 + 24 键契约 + 生产重跑)因「真实数据三变体裁决全灭」按失败协议
+  跳过(留痕见 03-05-SUMMARY.md 的裁决数值表)。
+- **缺口:** `stereo.joint` 段与引擎(joint.py)随生产 config.yaml 出厂,但
+  `run_stereo` 不读该开关——评估链接线 + 24 键契约未实施。
+- **已落地的临时收口(CR-01 修复):** `run_stereo` 入口 fail-closed 硬门——
+  `enabled: true` 中文 ValueError 拦截(先于目录清理);config.yaml 注释如实化
+  (默认 false、当前不可置 true)。
+- **待办(接线任务落地时执行):** 完成 03-05 Task 3 全量(评估链接线 + 24 键
+  契约 + spread 防线生产验证 + 生产重跑 SC1-4 验收),移除 fail-closed 硬门;
+  前提 = 三变体裁决结论反转(引用 03-05-SUMMARY.md 裁决数值表复核)。
+
+### 2026-10-24 · phase-03 code review IN-04 · K/params 双轨无交叉核对(不修,登记)
+
+- **位置:** `src/stereo_calib/stereo/observation.py` load_intrinsics——IntrinsicsView
+  的 K/D 与九名 params 是有意双轨,但两轨之间无 allclose 交叉核对;文件被部分
+  篡改(K 改了 params 没改)时 PnP/DLT 链路(消费 K)与 models 残差链路(消费
+  params)静默分叉。属 review Info 级(非 Critical/Warning),本期不修;
+  后续如加固,补 `K[:2,:2] 对角/平移列 vs params[:4]` 核对 + 中文报错。
+
+### 2026-10-24 · phase-03 code review IN-05 · 降级 NaN 产出非严格 JSON(不修,登记)
+
+- **位置:** `src/stereo_calib/stereo/pipeline.py` 降级路径 + `artifacts.py`
+  json.dump 默认 allow_nan=True——test/train 评估降级时 NaN 会写成 `NaN`
+  字面量,ECMA-404 严格解析器(serde/Rust、多数 Java 库)会拒绝整个契约
+  文件。本期 Python 侧消费不受影响,按 review 结论不修;后续如加固,写侧
+  非有限值显式转 null 并在 report 标注。
+
