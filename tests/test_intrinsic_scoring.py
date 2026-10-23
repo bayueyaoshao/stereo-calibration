@@ -15,7 +15,6 @@ from __future__ import annotations
 import pathlib
 
 import numpy as np
-import pytest
 
 from stereo_calib.intrinsic import models
 from stereo_calib.intrinsic.scoring import score_pose_only
