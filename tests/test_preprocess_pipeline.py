@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from stereo_calib.cli.main import preprocess
+from stereo_calib.preprocess.pipeline import _fail_reason
 
 # 最小合法配置(与 test_io_config 同一体例;数据只有 train,test 缺目录记警告)
 _CONFIG_YAML = """\
@@ -330,3 +331,28 @@ def test_rerun_clears_stale_artifacts(tmp_path, monkeypatch, make_chessboard_ima
                                  allow_pickle=False)["detected"].sum())
                      for c in (1, 2))
     assert n_vis == n_detected == 4, "重建后标注图数仍须恰等于两路检出数之和"
+
+
+# ---- 261023-wp3 Task 3:TaskFailed 失败标签按异常类型区分(WR-02)----
+
+def test_fail_reason_read_error_keeps_read_failure_label():
+    """读图 ValueError(消息含「照片读取失败」)→ 仍标「读图失败:」,
+    原始报错文本完整保留(e2e 契约:test_parallel.py 坏 JPEG 帧断言不变)。"""
+    err = ValueError("照片读取失败:data/x.jpg。文件可能损坏")
+    reason = _fail_reason(err)
+    assert reason.startswith("读图失败:")
+    assert "照片读取失败:data/x.jpg。文件可能损坏" in reason
+
+
+def test_fail_reason_assertion_error_labeled_detect_failure():
+    """窗口断言 AssertionError →「检测失败(AssertionError):」前缀,
+    原始报错文本完整保留(复核方向不再被误导去找文件系统问题)。"""
+    err = AssertionError("亚像素窗口断言失败:2*3+1=7 ≥ sq_px=5")
+    reason = _fail_reason(err)
+    assert reason.startswith("检测失败(AssertionError):")
+    assert "亚像素窗口断言失败" in reason
+
+
+def test_fail_reason_generic_exception_exact_format():
+    """其他 worker 异常 → 恰好「检测失败(类型名):原文」。"""
+    assert _fail_reason(RuntimeError("boom")) == "检测失败(RuntimeError):boom"
