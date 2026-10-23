@@ -1,0 +1,45 @@
+[project]
+name = "stereo-calibration"
+version = "0.1.0"
+description = "双目相机标定生产工具:输入同步双目图像对,输出经测试集指标验证的内参、双目外参与量化指标"
+readme = "readme.md"
+requires-python = ">=3.12"
+dependencies = [
+    # OpenCV 锁定 4.x 大版本:5.0(2026-08)刚发布,calib3d 行为易变,
+    # 与"可审计、可复现的数值结果"冲突;等 5.x 攒够补丁版再评估迁移
+    "opencv-python>=4.14,<5.0",
+    # numpy 2.5 与 scipy 1.18 是成对验证过的组合,必须一起锁
+    "numpy==2.5.*",
+    "scipy==1.18.*",
+    "typer>=0.15",
+    "pyyaml>=6.0",
+    # joblib:角点检测多进程并行(两路相机、多图像),loky 常驻工作进程,
+    # 避免每个任务重复导入 OpenCV;锁 >=1.4 因 return_as="generator"
+    # (逐个消费结果驱动进度播报)自 1.3 引入,1.4 起稳定。
+    # 纯 Python 包无编译扩展,与 numpy/scipy 的版本组合无 ABI 纠缠
+    "joblib>=1.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+# stereo-calib 命令行入口:三个子命令对应三个独立模块(D-09)
+stereo-calib = "stereo_calib.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 连字符包名不能 import,src 下目录用下划线
+packages = ["src/stereo_calib"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
