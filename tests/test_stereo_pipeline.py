@@ -665,3 +665,45 @@ def test_pipeline_source_guards_zero_math():
                      "write_extrinsics_stereo_json", "baseline_band_mm",
                      "rms_multiplier"):
         assert required in source, f"pipeline.py 缺少编排入口 {required}"
+
+
+# ---------- CLI stereo 子命令(03-04:占位替换 + 中文收口) ----------
+
+
+def test_cli_stereo_help_is_real_command():
+    """--help 锁定:stereo 必须是真命令的全链文案,绝不再现占位字样。"""
+    from typer.testing import CliRunner
+
+    from stereo_calib.cli.main import app
+
+    result = CliRunner().invoke(app, ["stereo", "--help"])
+    assert result.exit_code == 0
+    assert "模块3" in result.output, "help 文案必须保留模块3 语义"
+    assert "后续阶段实现" not in result.output, "占位文案必须已被真命令替换"
+
+
+def test_cli_stereo_bad_input_chinese_exit_1(tmp_path, monkeypatch):
+    """坏环境(缺 Phase 1/2 产物)→ 中文收口 typer.Exit code=1,不吐堆栈。"""
+    import typer
+
+    from stereo_calib.cli import main as cli_main
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(_STEREO_YAML.replace("__MIN_PAIRS__", "5"), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_main, "_config_path", cfg_path)
+    with pytest.raises(typer.Exit) as ei:
+        cli_main.stereo()
+    assert ei.value.exit_code == 1, "坏输入必须收口为退出码 1"
+
+
+def test_cli_stereo_synthetic_success(tmp_path, monkeypatch):
+    """正常合成环境(03-03 e2e 夹具)→ 一条命令跑通,契约产物落盘。"""
+    from stereo_calib.cli import main as cli_main
+
+    cfg_path, _s_train, _s_test = _stereo_e2e_env(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_main, "_config_path", cfg_path)
+    cli_main.stereo()
+    assert (tmp_path / "output" / "stereo" / "extrinsics_stereo.json").exists(), (
+        "CLI 一条命令必须产出双目外参契约文件")
