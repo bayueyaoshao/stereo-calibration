@@ -72,9 +72,13 @@ def _read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-@pytest.fixture
-def synthetic_run(tmp_path, monkeypatch, make_chessboard_image):
-    """造合成双目树 + 最小配置,进程内跑 preprocess(),返回产物根 output/。"""
+def _build_synthetic_dataset(tmp_path, make_chessboard_image,
+                             config_yaml: str = _CONFIG_YAML) -> dict:
+    """造合成双目树 + 写配置文件(多个测试夹具共用的树工厂),返回 data 快照。
+
+    树内容:g1/g2 两组两路合成棋盘(检出),g3 组纯噪声 cam1(检测失败);
+    详见 _VIEWS / _GROUPS 表。
+    """
     for (g, cam), view in _VIEWS.items():
         ts, leaf = _GROUPS[g]
         img, _corners, _sq = make_chessboard_image(degrade="blur", **view)
@@ -90,9 +94,14 @@ def synthetic_run(tmp_path, monkeypatch, make_chessboard_image):
     noise_target.parent.mkdir(parents=True, exist_ok=True)
     assert cv2.imwrite(str(noise_target), noise)
 
-    (tmp_path / "config.yaml").write_text(_CONFIG_YAML, encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(config_yaml, encoding="utf-8")
+    return _tree_snapshot(tmp_path / "data")
 
-    before = _tree_snapshot(tmp_path / "data")
+
+@pytest.fixture
+def synthetic_run(tmp_path, monkeypatch, make_chessboard_image):
+    """造合成双目树 + 最小配置,进程内跑 preprocess(),返回产物根 output/ 与 data 快照。"""
+    before = _build_synthetic_dataset(tmp_path, make_chessboard_image)
     monkeypatch.chdir(tmp_path)
     preprocess()  # 进程内直调命令函数;坏输入才会 typer.Exit(1),这里应成功
     return tmp_path / "output", before
@@ -180,3 +189,55 @@ def test_artifacts_under_output_and_data_untouched(synthetic_run):
         assert out.resolve() in p.resolve().parents or p.resolve() == out.resolve()
     after = _tree_snapshot(tmp_root / "data")
     assert after == before, "preprocess 绝不允许改动 data/ 里任何文件"
+
+
+# ---- 01-03 任务 1:全量角点标注图 + 失败帧原图副本(D-07/D-08/D-02)----
+
+def test_visualization_full_coverage_no_sampling(synthetic_run):
+    """D-07:visualization JPEG 数 == 该 split 两路 detected 计数和(全量无抽样);
+    每张检出帧都有同名标注图,且 JPEG 非空(size > 10KB)。"""
+    out, _before = synthetic_run
+    vis = sorted((out / "train" / "visualization").glob("*.jpg"))
+    n_detected = 0
+    for cam in (1, 2):
+        data = np.load(out / "train" / f"cam{cam}_train.npz", allow_pickle=False)
+        det = data["detected"]
+        n_detected += int(det.sum())
+        for i, iid in enumerate(data["image_ids"]):
+            if det[i]:
+                marked = out / "train" / "visualization" / f"{iid}.jpg"
+                assert marked.is_file(), f"检出帧 {iid} 缺角点标注图(D-07 全量覆盖被破坏)"
+    assert len(vis) == n_detected, "标注图张数必须恰等于两路检出数之和(无抽样、无残留)"
+    for p in vis:
+        assert p.stat().st_size > 10_000, f"{p.name} 疑似空图(JPEG q90 应远大于 10KB)"
+
+
+def test_fail_originals_byte_identical_copies(synthetic_run):
+    """D-02:每个 fail 帧都有 fail_{image_id}.jpg 副本且字节数与源一致(copy2);
+    副本数恰等于 fail 清单行数(不多不少)。"""
+    out, _before = synthetic_run
+    fail_dir = out / "train" / "fail_originals"
+    rows = _read_csv(out / "train" / "fail_train.csv")
+    assert rows, "合成树含噪声帧,fail 清单不应为空"
+    for row in rows:
+        dst = fail_dir / f"fail_{row['image_id']}.jpg"
+        assert dst.is_file(), f"失败帧 {row['image_id']} 缺原图副本"
+        assert dst.stat().st_size == Path(row["path"]).stat().st_size, \
+            f"{dst.name} 与源文件字节数不一致(copy2 应逐字节复制)"
+    assert len(list(fail_dir.glob("fail_*.jpg"))) == len(rows)
+
+
+def test_copy_fail_originals_switch_off(tmp_path, monkeypatch, make_tiny_jpg, capsys):
+    """开关关闭:fail_originals 不产出(目录不存在)且中文汇总含「已关闭」。"""
+    make_tiny_jpg("data/train/20261023_154100/20261023_154100_000001/cam1.jpg", 64, 48)
+    (tmp_path / "config.yaml").write_text(
+        _CONFIG_YAML.replace("copy_fail_originals: true", "copy_fail_originals: false"),
+        encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    preprocess()
+    out = tmp_path / "output"
+    rows = _read_csv(out / "train" / "fail_train.csv")
+    assert rows, "纯噪声小图必然检出失败,fail 清单不应为空"
+    assert not (out / "train" / "fail_originals").exists(), \
+        "copy_fail_originals 关闭时绝不能产出 fail_originals 目录"
+    assert "已关闭" in capsys.readouterr().out, "开关关闭时汇总必须打印「已关闭」提示"

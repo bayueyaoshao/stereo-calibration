@@ -5,8 +5,9 @@
 元组 → run_parallel 并行跑 detect_one worker(每图一任务;worker 内
 SB → classic 两级检测,任何异常包 TaskFailed 信封)→ 主进程逐个消费
 填槽 → 每相机每数据集一份 npz + meta.json + usable CSV,每数据集一份
-fail CSV → 打印中文汇总。max_workers = 1 时同函数串行回退(调试用,
-结果与并行一致)。
+fail CSV → 全部检出帧画角点标注图(D-07 全量无抽样)+ 失败帧原图
+fail_ 前缀副本(开关控制,D-02)→ 打印中文汇总。max_workers = 1 时
+同函数串行回退(调试用,结果与并行一致)。
 
 按 D-01:检出即可用,不加任何额外质量闸门;检测路线记入 npz source 列
 与 usable CSV 的 route 列("sb" / "classic")。
@@ -36,6 +37,7 @@ from stereo_calib.preprocess.artifacts import (
     write_usable_csv,
 )
 from stereo_calib.preprocess.parallel import TaskFailed, run_parallel
+from stereo_calib.visualization.overlay import copy_fail_original, render_marked
 
 _SPLITS = ("train", "test")
 _CAMS = (1, 2)
@@ -208,6 +210,36 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
         fail_path = write_fail_csv(split_dir / f"fail_{split}.csv", fail_by_split[split])
         artifacts.append(fail_path)
 
+    # ---- 全量角点标注图 + 失败帧原图副本(PREP-06/D-07/D-08/D-02)----
+    # 全部检出帧一张不落(D-07 绝不抽样——复核要挑"检出但角点偏移"的帧,
+    # 抽样会漏);标注画在内存副本上,原图只 imread(INFRA-03)。
+    # 路线文字用 npz 同一份 source 列的值("sb"/"classic"),翻图即知路线。
+    n_marked = 0
+    for split in _SPLITS:
+        vis_dir = out_root / split / "visualization"
+        for cam in _CAMS:
+            slot = groups[(split, cam)]
+            for j, rec in enumerate(slot["records"]):
+                if not slot["detected"][j]:
+                    continue
+                render_marked(
+                    rec.path, slot["uv"][j], cols, rows,
+                    route=str(slot["source"][j]),
+                    out_path=vis_dir / f"{rec.image_id}.jpg",
+                    jpeg_quality=cfg.preprocess.jpeg_quality,
+                )
+                n_marked += 1
+
+    # 失败帧原图副本(D-02 假失败复核入口):逐字节拷贝 fail_ 前缀副本,
+    # 开关 copy_fail_originals 由配置控制(关掉就不产目录)
+    n_copied = 0
+    if cfg.preprocess.copy_fail_originals:
+        for split in _SPLITS:
+            fail_dir = out_root / split / "fail_originals"
+            for row in fail_by_split[split]:
+                copy_fail_original(Path(row["path"]), row["image_id"], fail_dir)
+                n_copied += 1
+
     # ---- 中文汇总:逐 split×cam 检出率、方格边长统计、fail 计数、产物路径 ----
     typer.echo("预处理完成,产物已写盘。检出统计(检出 / 总数):")
     for split in _SPLITS:
@@ -229,6 +261,12 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
     typer.echo(f"  失败帧合计:{total_fail} 张(逐张原因见 fail_*.csv,人工复核入口 D-02)")
     typer.echo(f"  检测路线分布:sb {n_sb} 帧、classic {n_classic} 帧"
                f"(classic = SB 未检出、由经典检测器兜住的帧)")
+    typer.echo(f"  角点标注图:{n_marked} 张(output_root/{{train,test}}/visualization/,"
+               f"全部检出帧无抽样,图上烧录路径与路线 D-07/D-08)")
+    if cfg.preprocess.copy_fail_originals:
+        typer.echo(f"  失败帧原图副本:{n_copied} 张(fail_ 前缀,供人工复核假失败 D-02)")
+    else:
+        typer.echo("  失败帧原图拷贝已关闭(preprocess.copy_fail_originals: false)")
     typer.echo("  全部产物(绝对路径):")
     for p in artifacts:
         typer.echo(f"    {Path(p).resolve()}")
