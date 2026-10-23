@@ -8,7 +8,7 @@
 
 - [x] **Phase 1: 工程骨架 + 模块1 数据预处理** — 配置驱动工程骨架,角点检测/筛选/清单输出端到端可运行 (completed 2026-10-23)
 - [x] **Phase 2: 模块2 内参标定** — 两路相机 M2 内参标定 + test 集 RMS 验证 (completed 2026-10-23)
-- [ ] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证(blocked 2026-10-24:SC3 生产验收 FAIL,test 距离残差 16.93mm ≫ 5mm;CLI/链路已就绪,根因为两路内参在双目精度下互不兼容,联合 BA gap-closure 进行中)
+- [ ] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证(blocked 2026-10-24:SC3 生产验收 FAIL,test 距离残差 16.93mm ≫ 5mm;CLI/链路已就绪,根因为两路内参在双目精度下互不兼容;联合 BA gap-closure 03-05 裁决三变体全灭——内参漂移越诊断界,后续方案待决策)
 
 ## Phase Details
 
@@ -104,7 +104,7 @@ Plans:
 
 **Wave 5** *(gap-closure, blocked on Wave 4)*
 
-- [ ] 03-05-PLAN.md — 联合 BA gap-closure(内参+公共外参+逐对位姿,结构化变体 + Tikhonov 先验,收敛裁决先行)(STER-01/02/03/04)
+- [x] 03-05-PLAN.md — 联合 BA gap-closure(内参+公共外参+逐对位姿,结构化变体 + Tikhonov 先验,收敛裁决先行)(STER-01/02/03/04)〔已执行,结果 blocked:引擎 TDD 落地(209 测试绿)但收敛裁决三变体全灭——内参漂移全部越诊断界,SC3 达标与内参物理可信不可兼得;失败协议 config 零 diff,REQUIREMENTS 未勾选,详见 03-05-SUMMARY〕
 
 ## Progress
 
@@ -112,7 +112,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 4/4 executed,03-04 blocked | Blocked — gap-closure 联合 BA |  |
+| 3. 模块3 双目标定 | 5/5 executed,03-04/03-05 blocked | Blocked — 联合 BA 裁决全灭(漂移越界),待方案决策 |  |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*
