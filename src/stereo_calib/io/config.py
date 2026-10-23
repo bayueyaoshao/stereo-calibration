@@ -27,6 +27,10 @@ _ALLOWED_GRANULARITY = {"frame", "corner"}
 # 参考工程配置层直接拒收的防呆照搬(白名单只收 "trf")
 _ALLOWED_REFINE_METHODS = {"trf"}
 
+# 联合 BA 的结构化变体白名单(03-05):fc = 只放两路 f/c(D 冻结);
+# fc_prior = fc + Tikhonov 先验(f/c 相对偏差);full_prior = 全内参放开 + 先验
+_ALLOWED_JOINT_VARIANTS = {"fc", "fc_prior", "full_prior"}
+
 
 @dataclass(frozen=True)
 class BoardSpec:
@@ -165,13 +169,33 @@ class StereoOutlierConfig:
 
 
 @dataclass(frozen=True)
+class StereoJointConfig:
+    """模块3 联合 BA 段(03-05):内参 + 公共外参 + 逐对位姿联合精化。
+
+    结构化变体裁决体例(03-02 实测全内参放开始联合 descent 不收敛,必须
+    结构化约束防内参无界漂移):fc 只放两路焦距/主点(D 冻结在 Phase 2
+    初值);fc_prior 在 fc 之上加 Tikhonov 先验(f/c 相对偏差拉回);
+    full_prior 全内参放开 + 先验(D 绝对偏差拉回)。prior_weight 是先验行
+    的统一乘子;spread_ratio_max 是联合解散布防线阈值(精化后逐对残差
+    max/median,防翻转帧/孪生解污染的联合解带病出链)。enabled 默认 false:
+    rigid 路径行为零改动的开关保证。
+    """
+
+    enabled: bool = False
+    variant: str = "fc_prior"
+    prior_weight: float = 1.0
+    spread_ratio_max: float = 5.0
+
+
+@dataclass(frozen=True)
 class StereoConfig:
     """模块3 双目外参标定段:精化 / 离群剔除 / 消歧与防线阈值 / 手动剔除清单。
 
     flip_ratio 是 180° 角点序消歧的判定阈值(证据充分才翻,默认 0.5 取自
     参考工程实测;上限 1.0——超过即"证据不足也翻",拒收);median_spread
     是 Rodrigues 中位离散度防线;baseline_band_mm 是基线量级 sanity 硬带
-    (反序或塌缩成一点都会让 sanity 检查失效)。
+    (反序或塌缩成一点都会让 sanity 检查失效);joint 是联合 BA 子段
+    (默认关)。
     """
 
     refine: StereoRefineConfig = field(default_factory=StereoRefineConfig)
@@ -181,6 +205,7 @@ class StereoConfig:
     distance_rms_max_mm: float = 5.0
     baseline_band_mm: tuple[float, float] = (20.0, 2000.0)
     exclude_pairs: tuple[str, ...] = ()
+    joint: StereoJointConfig = field(default_factory=StereoJointConfig)
 
 
 @dataclass(frozen=True)
@@ -521,6 +546,45 @@ def _parse_stereo_outlier(raw: dict) -> StereoOutlierConfig:
                                max_iterations=max_iterations, min_pairs=min_pairs)
 
 
+def _parse_stereo_joint(raw: dict) -> StereoJointConfig:
+    """解析 stereo.joint 段(03-05 联合 BA):开关(bool)+ 变体白名单 +
+    先验权重正性 + 散布比判别力校验(照 _parse_stereo_refine 体例)。"""
+    cfg = StereoJointConfig()
+    section = _check_is_dict(raw.get("joint", {}), "stereo.joint")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("stereo.joint.enabled", enabled,
+              "必须是 true 或 false(是否启用内参+外参+逐对位姿联合 BA;默认关,"
+              "rigid 路径行为零改动)")
+
+    variant = section.get("variant", cfg.variant)
+    # 先判 str 再做集合成员检查:容器型 yaml 值(如 [fc])不可哈希,
+    # 直接 in set 会抛 TypeError(unhashable)击穿 CLI 异常网(WR-01)
+    if not isinstance(variant, str) or variant not in _ALLOWED_JOINT_VARIANTS:
+        _fail("stereo.joint.variant", variant,
+              f"只能是 {' 或 '.join(sorted(_ALLOWED_JOINT_VARIANTS))}"
+              f"(结构化变体:约束越强越防内参无界漂移,03-02 实测全放开不收敛)")
+
+    prior_weight = section.get("prior_weight", cfg.prior_weight)
+    if (not isinstance(prior_weight, int | float) or isinstance(prior_weight, bool)
+            or prior_weight <= 0):
+        _fail("stereo.joint.prior_weight", prior_weight,
+              "必须是 > 0 的数(Tikhonov 先验行的统一乘子;先验防内参漂移,"
+              "权重越大拉回越强)")
+
+    spread_ratio_max = section.get("spread_ratio_max", cfg.spread_ratio_max)
+    if (not isinstance(spread_ratio_max, int | float) or isinstance(spread_ratio_max, bool)
+            or spread_ratio_max <= 1.0):
+        _fail("stereo.joint.spread_ratio_max", spread_ratio_max,
+              "必须是 > 1.0 的数(精化后逐对残差 max/median 散布比上限;"
+              "max/median ≤ 1 数学上不存在,接近 1 无判别力)")
+
+    return StereoJointConfig(enabled=enabled, variant=variant,
+                             prior_weight=float(prior_weight),
+                             spread_ratio_max=float(spread_ratio_max))
+
+
 def _parse_stereo(raw: dict) -> StereoConfig:
     """解析 stereo 段(模块3 全部算法参数/开关,CLI 零算法参数)。"""
     section = _check_is_dict(raw.get("stereo", {}), "stereo")
@@ -567,7 +631,8 @@ def _parse_stereo(raw: dict) -> StereoConfig:
                         median_spread_max_deg=float(median_spread),
                         distance_rms_max_mm=float(distance_rms_max),
                         baseline_band_mm=(float(band[0]), float(band[1])),
-                        exclude_pairs=tuple(exclude))
+                        exclude_pairs=tuple(exclude),
+                        joint=_parse_stereo_joint(section))
 
 
 def _check_output_data_disjoint(cfg: StereoCalibConfig) -> None:

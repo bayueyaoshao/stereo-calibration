@@ -86,3 +86,10 @@ stereo:
   distance_rms_max_mm: 5.0             # test 集对角距离残差 RMS 判 PASS/FAIL 阈值(毫米;报告按此判,不作硬退出条件)
   baseline_band_mm: [20, 2000]         # baseline 量级 sanity 硬带(防 |t|≈2500mm 型灾难;本仓无支架物理记载,可后续收窄)
   exclude_pairs: []                    # 手动逻辑剔除对清单(group_id 列表;与自动机制叠加,原数据不动)
+  joint:
+    enabled: false                     # 内参+外参+逐对位姿联合 BA 开关(03-05 裁决后置 true);
+                                       # false = rigid 路径行为零改动的开关保证
+    variant: "fc_prior"                # 结构化变体:fc(只放两路 f/c,D 冻结)/ fc_prior(fc + 先验)/
+                                       # full_prior(全内参放开 + 先验);约束越强越防内参无界漂移
+    prior_weight: 1.0                  # Tikhonov 先验行统一乘子(f/c 相对偏差 + D 绝对偏差拉回)
+    spread_ratio_max: 5.0              # 联合解散布防线:精化后逐对 RMS max/median 超此值 → 中文报错(fail-closed)
