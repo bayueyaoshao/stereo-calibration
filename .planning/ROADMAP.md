@@ -34,7 +34,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — classic 兜底移植(缺陷闸门+阶梯重提)+ joblib loky 并行 + 异常信封(PREP-02)
+- [x] 01-02-PLAN.md — classic 兜底移植(缺陷闸门+阶梯重提)+ joblib loky 并行 + 异常信封(PREP-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -74,7 +74,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 工程骨架 + 模块1 数据预处理 | 1/3 | In Progress|  |
+| 1. 工程骨架 + 模块1 数据预处理 | 2/3 | In Progress|  |
 | 2. 模块2 内参标定 | 0/? | Not started | - |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
