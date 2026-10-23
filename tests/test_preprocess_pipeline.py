@@ -118,9 +118,10 @@ def test_npz_schema_and_masked_rows(synthetic_run):
     assert np.isnan(data1["uv"][j]).all(), "未检出帧 uv 必须整行 NaN(带掩码稠密契约)"
     assert data1["source"][j] == ""
     assert np.isnan(data1["sq_px"][j]) and np.isnan(data1["win_size"][j])
-    # 检出帧 source 全部记 sb(SB 主路线)
+    # 检出帧 source 必是两颗检测器之一(合成图全部 SB 检出;classic 兜底
+    # 接入后该列取值 ∈ {"sb", "classic"},绝不为空)
     ok = data1["detected"]
-    assert (data1["source"][ok] == "sb").all()
+    assert np.isin(data1["source"][ok], ("sb", "classic")).all()
     assert not np.isnan(data1["uv"][ok]).any()
 
 
@@ -139,8 +140,8 @@ def test_usable_csv_rows_match_detected(synthetic_run):
         data = np.load(out / "train" / f"cam{cam}_train.npz", allow_pickle=False)
         rows = _read_csv(out / "train" / f"usable_cam{cam}_train.csv")
         assert len(rows) == int(data["detected"].sum())
-        for row in rows:  # 每行 route 都标了来源
-            assert row["route"] == "sb"
+        for row in rows:  # 每行 route 都标了来源(SB 或 classic 兜底)
+            assert row["route"] in ("sb", "classic")
             assert row["image_id"]
 
 
