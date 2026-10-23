@@ -53,7 +53,23 @@ Plans:
   3. test 集整体重投影 RMS 以 float64 回代计算(不使用 OpenCV 返回值),每路相机 RMS 为亚像素量级(< 1.0 px,预期 ~0.1–0.5 px)
   4. 输出内参标定报告:逐帧重投影误差 + 整体 RMS,可识别离群帧
 
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — 配置段 + M2 数学单一源(models)+ npz 装载 + float64 指标尺(INTR-01/03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — 求解引擎:OpenCV 初值 + scipy 精化 + test 只估位姿评分,真实数据达亚像素(INTR-01/03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 02-03-PLAN.md — 编排与产物:离群自动剔除(留痕)+ intrinsics.json/报告/CSV + 合成 e2e 契约(INTR-01/02/03/04)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 02-04-PLAN.md — CLI 一条命令 + 真实数据全量生产运行 + 成功标准验收(INTR-01/02/03/04)
 
 ### Phase 3: 模块3 双目标定
 
@@ -75,7 +91,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
-| 2. 模块2 内参标定 | 0/? | Not started | - |
+| 2. 模块2 内参标定 | 0/4 | Not started | - |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
 ---
