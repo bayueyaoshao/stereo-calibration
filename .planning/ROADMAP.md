@@ -30,7 +30,7 @@
 Plans:
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Walking Skeleton:uv 骨架 + 配置层 + SB 检测核心 + 串行流水线,npz/CSV 落盘(PREP-01/02/03/05, INFRA-01/02/03)
+- [x] 01-01-PLAN.md — Walking Skeleton:uv 骨架 + 配置层 + SB 检测核心 + 串行流水线,npz/CSV 落盘(PREP-01/02/03/05, INFRA-01/02/03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -74,7 +74,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 工程骨架 + 模块1 数据预处理 | 0/3 | Planning done | - |
+| 1. 工程骨架 + 模块1 数据预处理 | 1/3 | In Progress|  |
 | 2. 模块2 内参标定 | 0/? | Not started | - |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
