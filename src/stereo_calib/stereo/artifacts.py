@@ -267,6 +267,9 @@ def write_report_md(path: Path | str, summary: dict, distance_rms_max_mm: float,
         lines.append(f"判定列按 distance_rms_max_mm = {distance_rms_max_mm} mm 给 "
                      f"PASS/FAIL——只作报告结论,不作退出条件。")
         lines.append("")
+        if summary.get("test_error"):
+            lines.append(f"**test 评估降级留痕**:{summary['test_error']}")
+            lines.append("")
 
         # ---- 逐帧距离残差表:train / test 各一节 ----
         for split in ("train", "test"):
