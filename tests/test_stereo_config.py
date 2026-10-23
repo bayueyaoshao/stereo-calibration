@@ -152,3 +152,71 @@ def test_missing_stereo_section_falls_back_to_defaults(tmp_path):
     assert cfg.stereo.median_spread_max_deg == pytest.approx(1.0)
     assert cfg.stereo.baseline_band_mm == (20.0, 2000.0)
     assert cfg.stereo.exclude_pairs == ()
+
+
+# ===========================================================================
+# 03-05:stereo.joint 段(联合 BA 配置)
+# ===========================================================================
+
+# joint 段追加在 MINIMAL_YAML 末尾(stereo 段之后;键全显式,不依赖隐式默认)
+JOINT_YAML = MINIMAL_YAML + """\
+  joint:
+    enabled: true
+    variant: "full_prior"
+    prior_weight: 0.01
+    spread_ratio_max: 5.0
+"""
+
+
+def _mutate_joint(field: str, value: str) -> str:
+    """把 stereo.joint 段里某个键的值换成给定值(只扫描 "joint:" 行之后的段落)。"""
+    lines = JOINT_YAML.splitlines()
+    start = lines.index("  joint:")
+    out: list[str] = []
+    replaced = False
+    for i, line in enumerate(lines):
+        key = line.strip().split(":")[0]
+        if i > start and key == field and not replaced:
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(f"{indent}{field}: {value}")
+            replaced = True
+        else:
+            out.append(line)
+    assert replaced, f"字段 {field} 不在 stereo.joint 段模板里"
+    return "\n".join(out) + "\n"
+
+
+def test_load_stereo_joint_all_fields(tmp_path):
+    """合法 joint 段加载:每个键解析到对应字段(含白名单内变体)。"""
+    cfg = load_config(_write_config(tmp_path, JOINT_YAML))
+    assert cfg.stereo.joint.enabled is True
+    assert cfg.stereo.joint.variant == "full_prior"
+    assert cfg.stereo.joint.prior_weight == pytest.approx(0.01)
+    assert cfg.stereo.joint.spread_ratio_max == pytest.approx(5.0)
+
+
+def test_stereo_joint_defaults_when_absent(tmp_path):
+    """缺 joint 段(03-05 之前的配置形态)不炸:整段走默认值(默认关,
+    rigid 行为零改动的开关保证)。"""
+    cfg = load_config(_write_config(tmp_path, MINIMAL_YAML))
+    assert cfg.stereo.joint.enabled is False
+    assert cfg.stereo.joint.variant == "fc_prior"
+    assert cfg.stereo.joint.prior_weight == pytest.approx(1.0)
+    assert cfg.stereo.joint.spread_ratio_max == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("enabled", "1"),                 # 布尔冒充开关必须被拦
+        ("variant", '"bogus"'),           # 白名单 {fc, fc_prior, full_prior} 外拒收
+        ("variant", "[fc]"),              # 容器型值不可哈希,先判 str 再查白名单
+        ("prior_weight", "0"),            # 先验权重必须 > 0
+        ("prior_weight", "-1.0"),         # 负先验权重拒收
+        ("spread_ratio_max", "1.0"),      # 比值上限必须 > 1.0(≤1 无判别力)
+        ("spread_ratio_max", "0.5"),      # 同上
+    ],
+)
+def test_joint_invalid_values_raise_with_chinese_message(tmp_path, field, bad_value):
+    with pytest.raises(ValueError, match="不合法"):
+        load_config(_write_config(tmp_path, _mutate_joint(field, bad_value)))

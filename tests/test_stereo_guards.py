@@ -82,3 +82,18 @@ def test_stereo_subtree_never_reads_images():
         assert n == 0, (
             f"{path.name} 出现 {n} 处读图调用:双目链路零读图,"
             f"角点一律来自 preprocess 产物 npz")
+
+
+def test_joint_refinement_uses_analytic_jac_no_sparsity():
+    """joint.py 雅可比组合(WR-02,jac 为 callable 时 scipy 静默忽略稀疏性
+    结构参数):解析路线 + 稀疏子问题解法器在位,被禁组合零出现;内参列必须
+    经 models.project_jacobian(单一数学源)。体例照 solve.py 既有用例。"""
+    source = (_STEREO / "joint.py").read_text(encoding="utf-8")
+    assert source.count("jac_" + "sparsity") == 0, (
+        "joint.py 出现稀疏性组合参数:联合精化雅可比必须解析路线(WR-02),"
+        "黑盒稀疏估计不得回潮")
+    assert "tr_solver" in source and "x_scale" in source, (
+        "joint.py 缺少稀疏子问题解法器与列缩放关键字(解析雅可比路线的配套在位断言)")
+    assert "project_jacobian" in source, (
+        "joint.py 内参列必须经 models.project_jacobian(单一数学源,"
+        "禁第二份投影导数)")
