@@ -18,13 +18,24 @@ import pathlib
 import cv2
 import numpy as np
 import pytest
+from scipy.optimize._numdiff import approx_derivative
 
 # pytest rootdir 模式(tests/ 无 __init__.py)把 tests 目录插进 sys.path
 from conftest import make_stereo_synth
 
-from stereo_calib.io.config import StereoCalibConfig
+from stereo_calib.io.config import StereoCalibConfig, StereoConfig, StereoRefineConfig
 from stereo_calib.stereo.observation import IntrinsicsView, Pairs
-from stereo_calib.stereo.solve import pnp_median, relative_pose
+from stereo_calib.stereo.solve import (
+    disambiguate_pairs,
+    make_jacobian_fn,
+    make_residual_fn,
+    pack_theta,
+    pnp_median,
+    relative_pose,
+    row_index,
+    solve_stereo,
+    unpack_theta,
+)
 
 _SOLVE_SOURCE = pathlib.Path("src/stereo_calib/stereo/solve.py")
 
@@ -172,3 +183,198 @@ def test_solve_source_guards_task1():
     assert "astype(np.float32)" in source, (
         "solvePnP 装包必须显式降 float32(绑定层 dtype 陷阱,Pitfall 7)")
     assert "median_spread" in source, "离散度防线阈值必须来自配置参数"
+
+
+# ---------- Task 2: θ 装箱/解箱 + 行号契约 ----------
+
+
+def test_pack_unpack_theta_roundtrip():
+    """θ = [6 外参 | 每对 (ω,t) 6 个] 装箱与解箱互逆(随机 θ 逐位还原)。
+
+    cam1 恒 (I, 0) 不进 θ(参考锚定系,N 对 → 6 + 6N 维);坏长度当场
+    中文报错,不带病进优化器。
+    """
+    rng = np.random.default_rng(3)
+    n = 3
+    rvec_rel = rng.normal(0.0, 0.05, 3)
+    t_rel = rng.normal(0.0, 30.0, 3)
+    rvecs = rng.normal(0.0, 0.3, (n, 3))
+    tvecs = np.column_stack([rng.normal(0.0, 40.0, n),
+                             rng.normal(0.0, 40.0, n),
+                             rng.uniform(500.0, 900.0, n)])
+    theta = pack_theta(rvec_rel, t_rel, rvecs, tvecs)
+    assert theta.shape == (6 + 6 * n,)
+    assert np.array_equal(theta[:3], rvec_rel) and np.array_equal(theta[3:6], t_rel)
+    rvec_rel2, t_rel2, rvecs2, tvecs2 = unpack_theta(theta)
+    assert np.array_equal(rvec_rel2, rvec_rel), "外参旋转向必须逐位还原"
+    assert np.array_equal(t_rel2, t_rel)
+    assert np.array_equal(rvecs2, rvecs) and np.array_equal(tvecs2, tvecs)
+    with pytest.raises(AssertionError, match="θ 向量长度"):
+        unpack_theta(np.zeros(11))  # 对不上任何对数(6+6N)
+
+
+def test_stereo_row_index_contract():
+    """残差行号契约:对 → 路(cam1 先 cam2 后)→ 点 → (u,v) 交错。
+
+    残差与雅可比只准调这一个函数定行号,各自手算下标 = 梯度接错行,
+    不报错、只是收敛奇慢(Pitfall 14 的姊妹坑)。
+    """
+    n_points = 88
+    assert row_index(0, 0, 0, 0, n_points) == 0
+    assert row_index(0, 0, 0, 1, n_points) == 1
+    assert row_index(0, 0, 1, 0, n_points) == 2
+    assert row_index(0, 1, 0, 0, n_points) == 2 * n_points, "cam2 行紧随该对 cam1 行"
+    assert row_index(1, 0, 0, 0, n_points) == 4 * n_points, "下一对从 4P 起"
+    with pytest.raises(AssertionError):
+        row_index(0, 2, 0, 0, n_points)  # cam_idx 只认 0/1
+    with pytest.raises(AssertionError):
+        row_index(0, 0, 0, 2, n_points)  # coord 只认 0/1
+
+
+# ---------- Task 2: 消歧 + 精化全链(solve_stereo 编排) ----------
+
+
+def test_solve_stereo_full_chain_with_flips():
+    """10 对注入 2 对 uv2 翻转 → 消歧检出翻回 + 精化全链恢复 0.1°/1mm。
+
+    这是全阶段数学风险最集中的一条:翻转对若漏网,相对位姿双峰、中位
+    被拖偏;消歧后精化必须把真值恢复到转角 < 0.1°、t < 1mm(plan 全链
+    口径),flip_log 留痕命中对号。
+    """
+    synth = make_stereo_synth(n_pairs=10, seed=7, flip_pair_indices=(1, 4))
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    cfg = StereoCalibConfig()  # 默认:refine 开、flip_ratio 0.5、spread 1.0°
+    result = solve_stereo(pairs, intr1, intr2, cfg)
+
+    assert result.solver == "scipy"
+    assert result.flip_log["train"]["pass2_flipped"] == 2, (
+        f"应检出 2 个翻转对,实测 {result.flip_log['train']['pass2_flipped']}")
+    assert set(result.flip_log["train"]["pair_ids"]) == {
+        synth.group_ids[1], synth.group_ids[4]}, "翻转留痕必须命中注入对号"
+
+    ang_err = _rotation_angle_deg(result.R, synth.R_rel_true)
+    t_err = float(np.linalg.norm(result.t - synth.t_rel_true))
+    assert ang_err < 0.1, f"全链转角误差 {ang_err:.4f}° 应 < 0.1°"
+    assert t_err < 1.0, f"全链平移误差 {t_err:.4f}mm 应 < 1mm"
+    assert result.baseline_mm == pytest.approx(float(np.linalg.norm(result.t)),
+                                               rel=0.0, abs=0.0)
+    assert result.per_pair_rms.shape == (10,) and np.isfinite(result.per_pair_rms).all()
+    assert result.rms_reproj < 0.5, f"全链 pooled RMS {result.rms_reproj:.4f}px 应 < 0.5"
+
+
+def test_solve_stereo_deterministic_flip_log():
+    """消歧确定性:同输入重复求解,flip_log 与 R/t 逐位一致(纯函数无随机性)。"""
+    synth = make_stereo_synth(n_pairs=10, seed=7, flip_pair_indices=(1, 4))
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    cfg = StereoCalibConfig()
+    r1 = solve_stereo(pairs, intr1, intr2, cfg)
+    r2 = solve_stereo(pairs, intr1, intr2, cfg)
+    assert r1.flip_log == r2.flip_log, "flip_log 必须逐位一致"
+    assert np.array_equal(r1.R, r2.R) and np.array_equal(r1.t, r2.t), (
+        "求解必须确定(逐位一致)")
+
+
+def test_refine_disabled_returns_pass2_init_bitwise():
+    """精化开关(配置控制):enabled=False → solver 如实标 pnp_median,
+    结果与「消歧后 pass-2 初值」逐位相等(R/t/rvec/转角/baseline/逐对 RMS)。"""
+    synth = make_stereo_synth(n_pairs=10, seed=7, flip_pair_indices=(1, 4))
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    cfg_off = StereoCalibConfig(
+        stereo=StereoConfig(refine=StereoRefineConfig(enabled=False)))
+    result = solve_stereo(pairs, intr1, intr2, cfg_off)
+    assert result.solver == "pnp_median"
+    assert "converged" not in result.solver_meta, "关闭精化不应出现精化收敛键"
+
+    # 复现 solve_stereo 内部管线到 pass-2,逐位比对
+    pass1 = pnp_median(pairs, intr1, intr2, None)
+    pairs2, _flip = disambiguate_pairs(pairs, intr1, intr2, pass1,
+                                       cfg_off.stereo.flip_ratio)
+    pass2 = pnp_median(pairs2, intr1, intr2, cfg_off.stereo.median_spread_max_deg)
+    assert np.array_equal(result.R, pass2.R)
+    assert np.array_equal(result.t, pass2.t)
+    assert np.array_equal(result.rvec, pass2.rvec)
+    assert result.rotation_angle_deg == pass2.rotation_angle_deg
+    assert result.baseline_mm == pass2.baseline_mm
+    assert np.array_equal(result.per_pair_rms, pass2.per_pair_rms)
+
+
+# ---------- Task 2: 解析稀疏雅可比(数值基准 + 稀疏结构) ----------
+
+
+def test_analytic_jacobian_matches_numeric_full_theta():
+    """解析稀疏雅可比对 θ 全维数值差分逐项一致(相对差 < 1e-6,6 对小场)。
+
+    行序错位的数值防线:残差按 row_index 契约排列,雅可比行序一旦接错
+    (外参列/位姿列串行),数值差分比对立刻爆炸。
+    """
+    synth = make_stereo_synth(n_pairs=6, seed=13)
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    init = pnp_median(pairs, intr1, intr2, None)
+    theta0 = pack_theta(init.rvec, init.t, init.rvecs1, init.tvecs1)
+
+    res_fn = make_residual_fn(synth.objp, pairs.uv1, pairs.uv2,
+                              intr1.params, intr2.params)
+    jac_num = approx_derivative(res_fn, theta0.copy(), method="3-point")
+    jac_ana = make_jacobian_fn(synth.objp, pairs.uv1, pairs.uv2,
+                               intr1.params, intr2.params)(theta0).toarray()
+    scale = max(float(np.abs(jac_num).max()), 1e-30)
+    rel = float(np.abs(jac_ana - jac_num).max()) / scale
+    assert rel < 1e-6, f"解析雅可比对 θ 全维数值差分相对差 {rel:.3e}(须 < 1e-6)"
+
+
+def test_jacobian_row_nnz_bounded():
+    """稀疏结构:每行 nnz ≤ 12(cam2 行 = 外参 6 + 本对位姿 6);cam1 行恰 6。
+
+    别对位姿列与 cam1 行的外参列结构为零;行-列配对错了不报错、只是
+    收敛奇慢,所以结构事实单独锁定。
+    """
+    synth = make_stereo_synth(n_pairs=3, seed=13)
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    init = pnp_median(pairs, intr1, intr2, None)
+    theta0 = pack_theta(init.rvec, init.t, init.rvecs1, init.tvecs1)
+    jac = make_jacobian_fn(synth.objp, pairs.uv1, pairs.uv2,
+                           intr1.params, intr2.params)(theta0)
+    n_points = pairs.objp.shape[0]
+    nnz_per_row = np.diff(jac.indptr)
+    assert nnz_per_row.max() <= 12, f"每行 nnz 应 ≤ 12,实测最大 {nnz_per_row.max()}"
+    cam1_rows = np.arange(jac.shape[0])
+    cam1_rows = cam1_rows[(cam1_rows % (4 * n_points)) < 2 * n_points]
+    assert (nnz_per_row[cam1_rows] == 6).all(), "cam1 行不碰外参列,nnz 应恰 6"
+
+
+def test_refine_solver_meta_records_evidence():
+    """solver_meta 判定依据不静默:status/nfev/代价/尾部改进/收敛/雅可比组合。"""
+    synth = make_stereo_synth(n_pairs=10, seed=7, flip_pair_indices=(1, 4))
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    result = solve_stereo(pairs, intr1, intr2, StereoCalibConfig())
+    for key in ("status", "nfev", "final_cost", "tail_improvement", "converged"):
+        assert key in result.solver_meta, f"solver_meta 缺 {key}(判定依据不静默)"
+    assert result.solver_meta["converged"] is True
+    assert result.solver_meta["jacobian"] == "analytic-jac, no sparsity", (
+        "雅可比组合必须留痕(决策 1:解析雅可比绝不传稀疏结构矩阵参数)")
+
+
+# ---------- 源码防线(Task 2:死代码回归 + 禁用例程) ----------
+
+
+def test_solve_source_guards_task2():
+    """solve.py 源文防线:无稀疏结构矩阵参数死代码、无禁用双目例程调用串、
+    Rodrigues 雅可比路线与 trf/lsmr/linear 配置字面量齐全(WR-02 / 决策 1)。
+    """
+    source = _SOLVE_SOURCE.read_text(encoding="utf-8")
+    assert source.count("_distort") == 0, "畸变公式只准经 intrinsic.models"
+    assert "jac_sparsity" not in source, (
+        "jac 为 callable 时稀疏结构矩阵参数被 scipy 静默忽略(死计算,WR-02),"
+        "不得传入")
+    assert "stereoCalibrate" not in source, (
+        "内建双目例程在本工程禁用(参考实测该机型 |t| 失真到 2500mm 量级)")
+    assert "cv2.Rodrigues" in source, "domega 雅可比必须走 Rodrigues 第二返回值"
+    assert 'tr_solver="lsmr"' in source and 'x_scale="jac"' in source, (
+        "scipy 精化必须走 trf + lsmr + x_scale=jac 的稀疏配置")
+    assert 'loss="linear"' in source, "loss 固定 linear(离群由剔除机制处理)"
