@@ -12,17 +12,16 @@
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] 模块1 数据预处理:对每路相机独立做棋盘格角点检测(SB 主路线 + classic 兜底,窗口自适应推导),筛选出棋盘格完整的图像 — Validated in Phase 1: 工程骨架 + 模块1 数据预处理(406 张全量:检出 326,sb 317/classic 9,data/ 只读验证)
+- [x] 模块1 输出:每路相机可用图像清单、两路相机公共视场图像对清单、所有图像对应的角点数据 — Validated in Phase 1(npz 八数组契约 + usable/fail CSV + 公共视场对 train 112/test 15)
+- [x] 三个模块各自可独立运行调试,输入输出明确,通过配置文件串联 — Phase 1 交付骨架:三子命令 + config.yaml 单一传参;intrinsic/stereo 独立运行在 Phase 2/3 完成验证
 
 ### Active
 
-- [ ] 模块1 数据预处理:对每路相机独立做棋盘格角点检测(SB 主路线 + classic 兜底,窗口自适应推导),筛选出棋盘格完整的图像
-- [ ] 模块1 输出:每路相机可用图像清单、两路相机公共视场图像对清单、所有图像对应的角点数据
 - [ ] 模块2 内参标定:对两路相机分别标定 M2 模型(fx,fy,cx,cy,k1,k2,p1,p2,k3),OpenCV calibrateCameraExtended 初值 + scipy least_squares 精化
 - [ ] 模块2 输出:两路相机内参文件 + test 数据集整体重投影 RMS 指标
 - [ ] 模块3 双目标定:用固定内参 + 公共视场角点求外参 R/T(PnP-median 初值 + 外参精化)
 - [ ] 模块3 输出:双目外参 R/T + test 数据集棋盘格最远两角点物理距离残差 RMS 指标
-- [ ] 三个模块各自可独立运行调试,输入输出明确,通过配置文件串联
 
 ### Out of Scope
 
@@ -63,7 +62,7 @@
 | 畸变模型固定 M2(p1,p2,k1,k2,k3) | 参考工程1已验证的同类别相机最优模型 | — Pending |
 | 内参求解:OpenCV 初值 + scipy 精化 | 工程1完整方案,精度更高,配置可开关 | — Pending |
 | 双目外参:PnP-median 初值 + 外参精化(不用 stereoCalibrate) | 工程2验证 stereoCalibrate 该机型有 bug | — Pending |
-| 角点检测:SB 主路线 + classic 兜底 | 工程1验证的双检测器策略 | — Pending |
+| 角点检测:SB 主路线 + classic 兜底 | 工程1验证的双检测器策略 | ✓ Phase 1 验证(326/406,只增不减) |
 | 双目验证指标:最远两角点物理距离残差 RMS | 直接反映测量精度,工程2已验证实现 | — Pending |
 
 ## Evolution
@@ -84,4 +83,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-23 after initialization*
+*Last updated: 2026-10-23 after Phase 1 completion*
