@@ -88,7 +88,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — 配置 stereo 段(决策 #1-#9 锁定)+ 双目对装载(连接键/行序锁/按名读内参)+ 合成双目几何夹具(STER-01)
+- [x] 03-01-PLAN.md — 配置 stereo 段(决策 #1-#9 锁定)+ 双目对装载(连接键/行序锁/按名读内参)+ 合成双目几何夹具(STER-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -108,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 0/4 | Not started | - |
+| 3. 模块3 双目标定 | 1/4 | In Progress|  |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*
