@@ -132,6 +132,58 @@ class IntrinsicConfig:
 
 
 @dataclass(frozen=True)
+class StereoRefineConfig:
+    """模块3 scipy 外参精化:开关 + 求解方法 + 迭代上限 + 收敛容差。
+
+    与模块2 RefineConfig 同构(θ = [6 外参 | 6×N 位姿] 的联合 BA);
+    容差默认值沿用 Phase 2 实测收敛组合,max_nfev 取 200(112 对 678 参数
+    规模留裕量;参考工程同规模实测数十次内收敛)。
+    """
+
+    enabled: bool = True
+    method: str = "trf"
+    max_nfev: int = 200
+    ftol: float = 1.0e-10
+    xtol: float = 1.0e-12
+    gtol: float = 1.0e-10
+
+
+@dataclass(frozen=True)
+class StereoOutlierConfig:
+    """模块3 双目自动离群对剔除:判离群阈值 + 双保险丝 + 幸存对数下限。
+
+    判据对象是逐对重投影 RMS(两路 pooled,float64 回代;Phase 2 是逐帧);
+    min_pairs 是剔除后幸存对数下限,双目侧对应 Phase 2 的 min_views。只
+    作用于 train pair,test 永不剔除只标记(考卷不可改)。
+    """
+
+    enabled: bool = True
+    rms_multiplier: float = 5.0
+    max_drop_fraction: float = 0.2
+    max_iterations: int = 3
+    min_pairs: int = 10
+
+
+@dataclass(frozen=True)
+class StereoConfig:
+    """模块3 双目外参标定段:精化 / 离群剔除 / 消歧与防线阈值 / 手动剔除清单。
+
+    flip_ratio 是 180° 角点序消歧的判定阈值(证据充分才翻,默认 0.5 取自
+    参考工程实测;上限 1.0——超过即"证据不足也翻",拒收);median_spread
+    是 Rodrigues 中位离散度防线;baseline_band_mm 是基线量级 sanity 硬带
+    (反序或塌缩成一点都会让 sanity 检查失效)。
+    """
+
+    refine: StereoRefineConfig = field(default_factory=StereoRefineConfig)
+    outlier: StereoOutlierConfig = field(default_factory=StereoOutlierConfig)
+    flip_ratio: float = 0.5
+    median_spread_max_deg: float = 1.0
+    distance_rms_max_mm: float = 5.0
+    baseline_band_mm: tuple[float, float] = (20.0, 2000.0)
+    exclude_pairs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class StereoCalibConfig:
     """config.yaml 解析结果:全流程参数的唯一载体(D-10 单一文件分段)。"""
 
@@ -141,6 +193,7 @@ class StereoCalibConfig:
     cv2_threads: int = 0
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     intrinsic: IntrinsicConfig = field(default_factory=IntrinsicConfig)
+    stereo: StereoConfig = field(default_factory=StereoConfig)
 
 
 def _fail(field_name: str, actual, requirement: str) -> None:
@@ -392,6 +445,131 @@ def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
                            rms_test_max=float(rms_test_max), exclude_images=tuple(exclude))
 
 
+def _parse_stereo_refine(raw: dict) -> StereoRefineConfig:
+    """解析 stereo.refine 段:开关(bool)+ 方法白名单 + 迭代/容差校验。"""
+    cfg = StereoRefineConfig()
+    section = _check_is_dict(raw.get("refine", {}), "stereo.refine")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("stereo.refine.enabled", enabled,
+              "必须是 true 或 false(PnP 初值之后是否做 scipy 外参联合精化)")
+
+    method = section.get("method", cfg.method)
+    # 先判 str 再做集合成员检查:容器型 yaml 值(如 [trf])不可哈希,
+    # 直接 in set 会抛 TypeError(unhashable)击穿 CLI 异常网(WR-01)
+    if not isinstance(method, str) or method not in _ALLOWED_REFINE_METHODS:
+        _fail("stereo.refine.method", method,
+              f"只能是 {' 或 '.join(sorted(_ALLOWED_REFINE_METHODS))}"
+              f"('lm' 只支持稠密雅可比,本工程走稀疏路径,直接拒收防呆)")
+
+    max_nfev = section.get("max_nfev", cfg.max_nfev)
+    if not isinstance(max_nfev, int) or isinstance(max_nfev, bool) or max_nfev < 1:
+        _fail("stereo.refine.max_nfev", max_nfev, "必须是 >= 1 的整数(精化函数求值次数上限)")
+
+    ftol = section.get("ftol", cfg.ftol)
+    if not isinstance(ftol, int | float) or isinstance(ftol, bool) or ftol <= 0:
+        _fail("stereo.refine.ftol", ftol, "必须是 > 0 的数(代价函数相对收敛容差)")
+
+    xtol = section.get("xtol", cfg.xtol)
+    if not isinstance(xtol, int | float) or isinstance(xtol, bool) or xtol <= 0:
+        _fail("stereo.refine.xtol", xtol, "必须是 > 0 的数(参数相对收敛容差)")
+
+    gtol = section.get("gtol", cfg.gtol)
+    if not isinstance(gtol, int | float) or isinstance(gtol, bool) or gtol <= 0:
+        _fail("stereo.refine.gtol", gtol, "必须是 > 0 的数(梯度无穷范数收敛容差)")
+
+    return StereoRefineConfig(enabled=enabled, method=method, max_nfev=max_nfev,
+                              ftol=float(ftol), xtol=float(xtol), gtol=float(gtol))
+
+
+def _parse_stereo_outlier(raw: dict) -> StereoOutlierConfig:
+    """解析 stereo.outlier 段:开关(bool)+ 阈值/保险丝/对数下限校验。"""
+    cfg = StereoOutlierConfig()
+    section = _check_is_dict(raw.get("outlier", {}), "stereo.outlier")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("stereo.outlier.enabled", enabled,
+              "必须是 true 或 false(是否自动剔除离群对后重解)")
+
+    rms_multiplier = section.get("rms_multiplier", cfg.rms_multiplier)
+    if (not isinstance(rms_multiplier, int | float) or isinstance(rms_multiplier, bool)
+            or rms_multiplier <= 1.0):
+        _fail("stereo.outlier.rms_multiplier", rms_multiplier,
+              "必须是 > 1.0 的数(逐对重投影 RMS > k×幸存中位数判离群;k<=1 无判别力)")
+
+    max_drop_fraction = section.get("max_drop_fraction", cfg.max_drop_fraction)
+    if (not isinstance(max_drop_fraction, int | float) or isinstance(max_drop_fraction, bool)
+            or not 0 < max_drop_fraction < 1):
+        _fail("stereo.outlier.max_drop_fraction", max_drop_fraction,
+              "必须是 0 到 1 之间(不含端点)的小数(累计剔除比例保险丝)")
+
+    max_iterations = section.get("max_iterations", cfg.max_iterations)
+    if (not isinstance(max_iterations, int) or isinstance(max_iterations, bool)
+            or max_iterations < 1):
+        _fail("stereo.outlier.max_iterations", max_iterations,
+              "必须是 >= 1 的整数(剔除-重解循环轮数上限)")
+
+    min_pairs = section.get("min_pairs", cfg.min_pairs)
+    if not isinstance(min_pairs, int) or isinstance(min_pairs, bool) or min_pairs < 2:
+        _fail("stereo.outlier.min_pairs", min_pairs,
+              "必须是 >= 2 的整数(剔除后幸存对数下限;一对定不了相对位姿)")
+
+    return StereoOutlierConfig(enabled=enabled, rms_multiplier=float(rms_multiplier),
+                               max_drop_fraction=float(max_drop_fraction),
+                               max_iterations=max_iterations, min_pairs=min_pairs)
+
+
+def _parse_stereo(raw: dict) -> StereoConfig:
+    """解析 stereo 段(模块3 全部算法参数/开关,CLI 零算法参数)。"""
+    section = _check_is_dict(raw.get("stereo", {}), "stereo")
+
+    flip_ratio = section.get("flip_ratio", StereoConfig.flip_ratio)
+    # 上限 1.0:err_rev < ratio×err_fwd 的判定里 ratio 超过 1 即
+    # "证据不足也翻"(Pitfall 11 的边界抖动),与"证据充分才翻"的设计相反
+    if (not isinstance(flip_ratio, int | float) or isinstance(flip_ratio, bool)
+            or not 0 < flip_ratio <= 1.0):
+        _fail("stereo.flip_ratio", flip_ratio,
+              "必须是 0 到 1.0 之间(含上端点)的数(消歧翻转判定阈值;超过 1.0 即证据不足也翻)")
+
+    median_spread = section.get("median_spread_max_deg", StereoConfig.median_spread_max_deg)
+    if (not isinstance(median_spread, int | float) or isinstance(median_spread, bool)
+            or median_spread <= 0):
+        _fail("stereo.median_spread_max_deg", median_spread,
+              "必须是 > 0 的数(Rodrigues 中位离散度防线上限,度)")
+
+    distance_rms_max = section.get("distance_rms_max_mm", StereoConfig.distance_rms_max_mm)
+    if (not isinstance(distance_rms_max, int | float) or isinstance(distance_rms_max, bool)
+            or distance_rms_max <= 0):
+        _fail("stereo.distance_rms_max_mm", distance_rms_max,
+              "必须是 > 0 的数(test 集对角距离残差 RMS 判 PASS/FAIL 的阈值,毫米)")
+
+    band = section.get("baseline_band_mm", StereoConfig.baseline_band_mm)
+    if (not isinstance(band, (list, tuple)) or len(band) != 2
+            or any(not isinstance(x, int | float) or isinstance(x, bool) for x in band)):
+        _fail("stereo.baseline_band_mm", band,
+              "必须是一列恰好两个数的区间(如 [20, 2000],毫米)")
+    if not 0 < float(band[0]) < float(band[1]):
+        _fail("stereo.baseline_band_mm", band,
+              "必须满足 0 < 下限 < 上限(反序或塌缩成一点都让 sanity 带失效)")
+
+    exclude = section.get("exclude_pairs", StereoConfig.exclude_pairs)
+    # 默认值是元组,yaml 解析出来是 list:两种序列形态都收,裸字符串才拒
+    # (照 intrinsic.exclude_images 的体例;只收 list 会把缺段默认值 () 拒掉)
+    if not isinstance(exclude, (list, tuple)) or not all(isinstance(x, str) for x in exclude):
+        _fail("stereo.exclude_pairs", exclude,
+              "必须是一列 group_id 文字(如 [20261023_154025_519359]),逐对手动逻辑剔除")
+
+    return StereoConfig(refine=_parse_stereo_refine(section),
+                        outlier=_parse_stereo_outlier(section),
+                        flip_ratio=float(flip_ratio),
+                        median_spread_max_deg=float(median_spread),
+                        distance_rms_max_mm=float(distance_rms_max),
+                        baseline_band_mm=(float(band[0]), float(band[1])),
+                        exclude_pairs=tuple(exclude))
+
+
 def _check_output_data_disjoint(cfg: StereoCalibConfig) -> None:
     """跨字段数据安全校验(CLAUDE.md data 只读 + INFRA-03 前置防线)。
 
@@ -440,9 +618,10 @@ def load_config(path: Path | str) -> StereoCalibConfig:
 
     preprocess = _parse_preprocess(raw)
     intrinsic = _parse_intrinsic(raw)
+    stereo = _parse_stereo(raw)
 
     cfg = StereoCalibConfig(board=board, data=data, output_root=output_root,
                             cv2_threads=cv2_threads, preprocess=preprocess,
-                            intrinsic=intrinsic)
+                            intrinsic=intrinsic, stereo=stereo)
     _check_output_data_disjoint(cfg)
     return cfg

@@ -65,3 +65,24 @@ intrinsic:
     min_views: 10                      # 剔除后幸存视图数下限(低于此数报错不硬算;惯例 ≥10)
   rms_test_max: 1.0                    # test 集整体 RMS 判 PASS/FAIL 阈值(像素;报告按此判,不作硬退出条件)
   exclude_images: []                   # 手动逻辑剔除清单(图像编号列表;与自动机制叠加,原数据不动)
+
+# ---- 模块3:双目外参标定(消费 Phase 1 对清单/角点 npz + Phase 2 intrinsics.json;固定内参求 R/T)----
+stereo:
+  refine:
+    enabled: true                      # PnP 初值之后是否做 scipy 外参联合精化(成功标准 1 配置控制要求)
+    method: "trf"                      # least_squares 求解方法,只收 trf('lm' 只支持稠密雅可比,拒收防呆)
+    max_nfev: 200                      # 精化函数求值次数上限(112 对 678 参数规模,200 留裕量)
+    ftol: 1.0e-10                      # 代价函数相对收敛容差(Phase 2 同款实测收敛组合)
+    xtol: 1.0e-12                      # 参数相对收敛容差(压到机器精度量级,保住精化收益)
+    gtol: 1.0e-10                      # 梯度无穷范数收敛容差(Phase 2 同值)
+  outlier:
+    enabled: true                      # 双目离群对自动剔除开关:逐对 RMS 超阈 → 剔除 → 重解(全程留痕进报告)
+    rms_multiplier: 5.0                # 判离群阈值:逐对重投影 RMS > 5×幸存中位数(中位数基准不受离群自身拖动)
+    max_drop_fraction: 0.2             # 保险丝:累计剔除不得超过 20% 对(防剔除循环吃掉过多对)
+    max_iterations: 3                  # 保险丝:剔除-重解循环轮数上限(防中位数随剔除漂移不收敛)
+    min_pairs: 10                      # 剔除后幸存对数下限(低于此数报错不硬算;双目侧对应 intrinsic.outlier.min_views)
+  flip_ratio: 0.5                      # 180° 消歧判定阈值:err_rev < 0.5×err_fwd 才翻(参考 05 实测;证据充分才翻,防边界抖动)
+  median_spread_max_deg: 1.0           # Rodrigues 中位离散度防线上限(刚架相对位姿跨帧摆动应远小于此,超即中文报错)
+  distance_rms_max_mm: 5.0             # test 集对角距离残差 RMS 判 PASS/FAIL 阈值(毫米;报告按此判,不作硬退出条件)
+  baseline_band_mm: [20, 2000]         # baseline 量级 sanity 硬带(防 |t|≈2500mm 型灾难;本仓无支架物理记载,可后续收窄)
+  exclude_pairs: []                    # 手动逻辑剔除对清单(group_id 列表;与自动机制叠加,原数据不动)
