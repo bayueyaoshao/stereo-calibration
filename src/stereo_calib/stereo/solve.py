@@ -23,12 +23,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
+from scipy.optimize import least_squares
+from scipy.sparse import coo_matrix, csr_matrix
 
 from stereo_calib.intrinsic import models
+from stereo_calib.intrinsic.solve import _is_practically_converged, _tail_improvement
+from stereo_calib.io.config import StereoCalibConfig, StereoRefineConfig
 from stereo_calib.stereo.observation import IntrinsicsView, Pairs
 
 # solvePnP 逐对调用的数值异常家族收口(scoring.py 同款体例):失败对按单对
@@ -233,3 +237,429 @@ def pnp_median(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
         rvecs1=rvecs1, tvecs1=tvecs1, rvecs2=rvecs2, tvecs2=tvecs2,
         per_pair_rms=per_pair_rms, per_pair_ok=tuple(per_pair_ok),
         spread_deg=spread_deg, n_valid=n_valid)
+
+
+# ---------------------------------------------------------------------------
+# 两遍法消歧(参考 cli/05_extrinsic_multi.py 排序规范化,锚改两遍法自洽)
+# ---------------------------------------------------------------------------
+
+
+def disambiguate_pairs(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
+                       init: StereoInit, flip_ratio: float) -> tuple[Pairs, dict]:
+    """180° 角点序消歧(两遍法 pass-1→pass-2 的中间步):证据充分才翻。
+
+    白话:棋盘有 180° 旋转对称,两台相机视角不同,Phase 1 的单图规范序
+    不保证跨相机物理同一性——某一路的角点序可能整体反了。拿 pass-1 的
+    外参 + 每对该路自身的 PnP 位姿当锚,把物点投影到该相机,比较「原始
+    序 / 反转序」谁的投影误差小;反转序误差 < flip_ratio × 原始序误差才翻
+    (决策 3:证据充分才翻,防边界帧误翻,Pitfall 11)。
+
+    锚自洽性(为什么不依赖 Phase 2 位姿产物,Pitfall 12:实测 7/112 对缺
+    cam1 锚):pass-1 中位外参由多数正确对撑起(中位数对少数翻转对鲁棒),
+    cam2 的锚是"多数帧共识";若 cam1 自身角点序整体翻转,PnP 解出的是
+    180° 转板位姿,两路一致地消歧到同一物理约定,而最终指标(板系对角
+    距离)对整体翻转不变(角点 0↔87 互换,距离相同)。
+
+    返回:(消歧后的新 Pairs(翻转对取 arr[::-1].copy(),绝不原地改),
+    flip_log dict {"pass2_flipped": int, "pair_ids": [...]})(留痕不静默,
+    T-03-06)。规则是纯函数:同输入同输出,无随机性。
+    """
+    if not 0 < flip_ratio <= 1.0:
+        # 配置层已校验;此处防线自证(函数独立调用时不带病运行)
+        raise ValueError(
+            f"消歧判定阈值不合法:期望 0 到 1.0 之间(含上端点)的数,实际是 "
+            f"{flip_ratio!r}。超过 1.0 即证据不足也翻(Pitfall 11)。"
+        )
+    params1 = np.asarray(intr1.params, dtype=np.float64).ravel()
+    params2 = np.asarray(intr2.params, dtype=np.float64).ravel()
+    objp = np.asarray(pairs.objp, dtype=np.float64)
+    uv1 = np.array(pairs.uv1, dtype=np.float64)  # 拷贝后修改:输入 Pairs 保持只读
+    uv2 = np.array(pairs.uv2, dtype=np.float64)
+
+    flipped_ids: list[str] = []
+    for j, gid in enumerate(pairs.image_ids):
+        if not init.per_pair_ok[j]:
+            continue  # 该对 pass-1 PnP 失败、无锚:不翻,留给剔除机制处置
+        R1, _ = cv2.Rodrigues(init.rvecs1[j])
+        xw = (R1 @ objp.T).T + init.tvecs1[j]  # 板 → cam1(该对自身 PnP 位姿)
+
+        # cam1:锚即自身解,数学上恒不翻;照判保对称(参考 06 对含锚在内的
+        # 所有路都消歧,锚自洽时是无害的恒等操作)
+        proj1 = models.project(xw, params1)
+        e_fwd = float(np.linalg.norm(proj1 - uv1[j]))
+        e_rev = float(np.linalg.norm(proj1 - uv1[j][::-1]))
+        if e_rev < flip_ratio * e_fwd:
+            uv1[j] = uv1[j][::-1].copy()
+            flipped_ids.append(gid)
+
+        # cam2:锚 = pass-1 外参组合(X_cam2 = R_rel @ X_cam1 + t_rel 预测
+        # cam2 系坐标,再按该路内参投影)
+        x2 = xw @ init.R.T + init.t
+        proj2 = models.project(x2, params2)
+        e_fwd = float(np.linalg.norm(proj2 - uv2[j]))
+        e_rev = float(np.linalg.norm(proj2 - uv2[j][::-1]))
+        if e_rev < flip_ratio * e_fwd:
+            uv2[j] = uv2[j][::-1].copy()
+            if gid not in flipped_ids:
+                flipped_ids.append(gid)
+
+    pairs_out = Pairs(image_ids=pairs.image_ids, source1=pairs.source1,
+                      source2=pairs.source2, routes=pairs.routes,
+                      uv1=uv1, uv2=uv2, objp=pairs.objp)
+    return pairs_out, {"pass2_flipped": len(flipped_ids), "pair_ids": flipped_ids}
+
+
+# ---------------------------------------------------------------------------
+# scipy 外参精化:θ 装箱 + row_index 行序契约 + 解析稀疏雅可比
+# (移植自参考 core/multibundle.py JointBundleAdjustment 的 2 相机特化;
+# 仓库体例照 intrinsic/solve.py)
+# ---------------------------------------------------------------------------
+
+
+def row_index(pair_idx: int, cam_idx: int, point_idx: int,
+              coord: int, n_points: int) -> int:
+    """残差行号契约:对 → 路(cam1 先 cam2 后)→ 点 → (u,v) 两行交错。
+
+    残差与雅可比共用的唯一行号函数,两侧只准调本函数、不准各自手算下标
+    ——行号算错 = 梯度接错行(Pitfall 14 的姊妹坑),不报异常、只是收敛
+    奇慢或原地不动。cam_idx 0 = cam1(该块只碰本对位姿列),1 = cam2
+    (碰外参列 + 本对位姿列)。
+    """
+    if cam_idx not in (0, 1):
+        raise AssertionError(
+            f"cam_idx 只能是 0(cam1)或 1(cam2),实际是 {cam_idx!r}。"
+            f"双目残差按「每对先 cam1 块后 cam2 块」排列,行号函数只认识两路。"
+        )
+    if coord not in (0, 1):
+        raise AssertionError(
+            f"coord 只能是 0(u 分量)或 1(v 分量),实际是 {coord!r}。"
+            f"残差按 (u,v) 两行交错排列,行号函数只认识这两个分量。"
+        )
+    return 2 * ((pair_idx * 2 + cam_idx) * n_points + point_idx) + coord
+
+
+def pack_theta(rvec_rel: np.ndarray, t_rel: np.ndarray,
+               rvecs_j: np.ndarray, tvecs_j: np.ndarray) -> np.ndarray:
+    """外参 + 逐对位姿 → 联合单向量 θ = [外参 (ω_rel,t_rel) 6 个 | 对 j 的 6 个 | …]。
+
+    cam1 恒为单位位姿 (I, 0),是参考系本身、不是被估对象,不进 θ——
+    N 对 → 6 + 6N 维 float64。不做「外参/位姿分块交替优化」(Don't
+    Hand-Roll,与 Phase 2 同一裁决)。
+    """
+    r = np.asarray(rvec_rel, dtype=np.float64).ravel()
+    t = np.asarray(t_rel, dtype=np.float64).ravel()
+    rv = np.asarray(rvecs_j, dtype=np.float64)
+    tv = np.asarray(tvecs_j, dtype=np.float64)
+    if r.shape != (3,) or t.shape != (3,):
+        raise AssertionError(
+            f"外参形状不合:期望 rvec_rel/t_rel 各 (3,),实际是 {r.shape} / {t.shape}。"
+            f"旋转向量与平移向量必须各 3 个数(Rodrigues 语义)。"
+        )
+    if rv.ndim != 2 or rv.shape[1] != 3 or rv.shape[0] < 1 or tv.shape != rv.shape:
+        raise AssertionError(
+            f"rvecs_j/tvecs_j 形状不合:期望各 (对数,3) 且对数 >= 1,实际是 "
+            f"{rv.shape} / {tv.shape}。请检查位姿是否按对逐行给出。"
+        )
+    pieces = [r, t]
+    for j in range(rv.shape[0]):
+        pieces.append(np.concatenate([rv[j], tv[j]]))  # 对 j 的 (ω,t) 6 个连排
+    return np.concatenate(pieces)
+
+
+def unpack_theta(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """θ (6+6N,) → (rvec_rel, t_rel, rvecs_j, tvecs_j);与 pack_theta 互逆。
+
+    长度对不上任何对数时直接中文报错——装箱与解箱必须同一布局,错位在
+    这里点名,不带病进优化器。
+    """
+    th = np.asarray(theta, dtype=np.float64).ravel()
+    if th.shape[0] < 12 or (th.shape[0] - 6) % 6 != 0:
+        raise AssertionError(
+            f"θ 向量长度不合:应为 外参6 + 6×对数,实际 {th.shape[0]}"
+            f"(对不上任何对数)。请检查 θ 是否由 pack_theta 按同一布局装出。"
+        )
+    n_pairs = (th.shape[0] - 6) // 6
+    rvec_rel = th[:3].copy()
+    t_rel = th[3:6].copy()
+    rvecs = np.empty((n_pairs, 3), dtype=np.float64)
+    tvecs = np.empty((n_pairs, 3), dtype=np.float64)
+    for j in range(n_pairs):
+        chunk = th[6 + 6 * j: 6 + 6 * (j + 1)]
+        rvecs[j] = chunk[:3]   # 前 3 个 = 该对旋转向量 ω(Rodrigues 语义)
+        tvecs[j] = chunk[3:]   # 后 3 个 = 该对平移向量 t
+    return rvec_rel, t_rel, rvecs, tvecs
+
+
+def make_residual_fn(objp: np.ndarray, uv1: np.ndarray, uv2: np.ndarray,
+                     params1: np.ndarray, params2: np.ndarray):
+    """残差函数工厂:callable(θ) → (4·N·P,) 残差向量,float64。
+
+    残差 = 两路重投影误差,只由 models.transform_to_camera + models.project
+    构成(单一数学源,源码防线锁定):
+      cam1:X_cam1 = transform_to_camera(objp, ω_j, t_j),project(·, params1) − uv1_j
+      cam2:X_cam2 = R_rel @ X_cam1 + t_rel,project(·, params2) − uv2_j
+    行序 = row_index 契约(每对先 cam1 块 2P 行、后 cam2 块 2P 行;块内
+    (n,2) ravel 天然是 (u,v) 交错)。
+    """
+    objp_arr = np.asarray(objp, dtype=np.float64)
+    u1 = np.asarray(uv1, dtype=np.float64)
+    u2 = np.asarray(uv2, dtype=np.float64)
+    if u1.ndim != 3 or u1.shape[2] != 2 or u2.shape != u1.shape:
+        raise ValueError(
+            f"双目观测形状不合:期望 uv1/uv2 各 (对数,角点数,2),实际是 "
+            f"{u1.shape} / {u2.shape}。请检查调用方的数据排布。"
+        )
+    n_pairs, n_points = u1.shape[0], u1.shape[1]
+    p1 = np.asarray(params1, dtype=np.float64).ravel()
+    p2 = np.asarray(params2, dtype=np.float64).ravel()
+
+    def residual_fn(theta: np.ndarray) -> np.ndarray:
+        rvec_rel, t_rel, rvecs_j, tvecs_j = unpack_theta(theta)
+        R_rel, _ = cv2.Rodrigues(rvec_rel)
+        out = np.empty(4 * n_pairs * n_points, dtype=np.float64)
+        for j in range(n_pairs):
+            x1, _ = models.transform_to_camera(objp_arr, rvecs_j[j], tvecs_j[j])
+            x2 = x1 @ R_rel.T + t_rel  # X_cam2 = R_rel @ X_cam1 + t_rel(行向量式)
+            out[j * 4 * n_points: j * 4 * n_points + 2 * n_points] = (
+                models.project(x1, p1) - u1[j]).ravel()
+            out[j * 4 * n_points + 2 * n_points:(j + 1) * 4 * n_points] = (
+                models.project(x2, p2) - u2[j]).ravel()
+        return out
+
+    return residual_fn
+
+
+def _structure_positions(n_pairs: int, n_points: int) -> tuple[np.ndarray, np.ndarray]:
+    """全部 (行, 列) 结构位置,按 [对0 cam1 块、对0 cam2 块、对1 …] 顺序展平。
+
+    结构事实:cam1 行恰碰本对 6 个位姿列(nnz = 6);cam2 行碰外参 6 列 +
+    本对 6 个位姿列(nnz = 12);别对位姿列与 cam1 行的外参列结构为零。
+    行序同 row_index 契约(Pitfall 14:残差与雅可比共用行序,错序不报错
+    只收敛奇慢)。
+    """
+    row_cam1 = np.arange(2 * n_points)
+    row_cam2 = np.arange(2 * n_points, 4 * n_points)
+    col_ext = np.arange(6)
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    for j in range(n_pairs):
+        base = j * 4 * n_points
+        col_pose = np.arange(6 + 6 * j, 6 + 6 * (j + 1))
+        rows.append(np.broadcast_to((base + row_cam1)[:, None], (2 * n_points, 6)))
+        cols.append(np.broadcast_to(col_pose, (2 * n_points, 6)))
+        rows.append(np.broadcast_to((base + row_cam2)[:, None], (2 * n_points, 12)))
+        cols.append(np.broadcast_to(np.concatenate([col_ext, col_pose]),
+                                    (2 * n_points, 12)))
+    return (np.concatenate([r.ravel() for r in rows]),
+            np.concatenate([c.ravel() for c in cols]))
+
+
+def make_jacobian_fn(objp: np.ndarray, uv1: np.ndarray, uv2: np.ndarray,
+                     params1: np.ndarray, params2: np.ndarray):
+    """解析稀疏雅可比工厂:callable(θ) → scipy.sparse.csr_matrix,形状 (4NP, 6+6N)。
+
+    逐对组装(链式法则,全部构件来自 models 与 cv2.Rodrigues 第二返回值,
+    严禁手写 ∂Xc/∂ω = −[Xc]× 形式——那只在 ω=0 成立):
+    - cam1 位姿 6 列 = project_point_jacobian (P,2,3) · ∂X1/∂(ω,t) (P,3,6);
+    - cam2 位姿 6 列:∂X2/∂pose_j = R_rel @ ∂X1/∂pose_j(外参组合是线性
+      变换),再链 cam2 的投影点雅可比;
+    - cam2 外参 6 刢:∂X2/∂ω_rel[k] = Σ_j' rot_jac_rel[k,i,j']·X1_j'
+      (einsum 一次算完,与 models.transform_to_camera 同一模式)、
+      ∂X2/∂t_rel = 单位阵,再链投影点雅可比;内参固定,无内参列。
+    COO 三元组向量化拼接后转 csr;数值正确性由 θ 全维差分基准测试锁定
+    (相对差 < 1e-6)。决策 1:解析雅可比路线,绝不传稀疏结构矩阵参数
+    (jac 为 callable 时 scipy 对它静默忽略——传了是死代码,WR-02 教训;
+    源码防线测试锁定)。
+    """
+    objp_arr = np.asarray(objp, dtype=np.float64)
+    u1 = np.asarray(uv1, dtype=np.float64)
+    u2 = np.asarray(uv2, dtype=np.float64)
+    if u1.ndim != 3 or u1.shape[2] != 2 or u2.shape != u1.shape:
+        raise ValueError(
+            f"双目观测形状不合:期望 uv1/uv2 各 (对数,角点数,2),实际是 "
+            f"{u1.shape} / {u2.shape}。请检查调用方的数据排布。"
+        )
+    n_pairs, n_points = u1.shape[0], u1.shape[1]
+    p1 = np.asarray(params1, dtype=np.float64).ravel()
+    p2 = np.asarray(params2, dtype=np.float64).ravel()
+    shape = (4 * n_pairs * n_points, 6 + 6 * n_pairs)
+    rows, cols = _structure_positions(n_pairs, n_points)
+    eye3 = np.eye(3, dtype=np.float64)
+
+    def jacobian_fn(theta: np.ndarray) -> csr_matrix:
+        rvec_rel, _t_rel, rvecs_j, tvecs_j = unpack_theta(theta)
+        R_rel, rot_jac_rel = cv2.Rodrigues(rvec_rel)  # 第二返回值 = 现成雅可比
+        vals: list[np.ndarray] = []
+        for j in range(n_pairs):
+            x1, dxc1 = models.transform_to_camera(
+                objp_arr, rvecs_j[j], tvecs_j[j], want_jacobian=True)
+            x2 = x1 @ R_rel.T + _t_rel
+            jp1 = models.project_point_jacobian(x1, p1)   # (P,2,3)
+            jp2 = models.project_point_jacobian(x2, p2)   # (P,2,3)
+            jac1_pose = np.einsum("nij,njk->nik", jp1, dxc1)          # (P,2,6)
+            dxc2_pose = np.einsum("ij,njk->nik", R_rel, dxc1)         # (P,3,6)
+            jac2_pose = np.einsum("nij,njk->nik", jp2, dxc2_pose)     # (P,2,6)
+            dxc2_ext = np.empty((x1.shape[0], 3, 6), dtype=np.float64)
+            dxc2_ext[:, :, 0:3] = np.einsum("kij,nj->nik", rot_jac_rel.reshape(3, 3, 3), x1)
+            dxc2_ext[:, :, 3:6] = eye3
+            jac2_ext = np.einsum("nij,njk->nik", jp2, dxc2_ext)       # (P,2,6)
+            vals.append(jac1_pose.ravel())  # 展平顺序与 _structure_positions 一致
+            vals.append(np.concatenate([jac2_ext, jac2_pose], axis=2).ravel())
+        return coo_matrix((np.concatenate(vals), (rows, cols)), shape=shape).tocsr()
+
+    return jacobian_fn
+
+
+@dataclass(frozen=True)
+class StereoResult:
+    """双目求解终解(不可变):cam1 参考系外参 + 全部诊断留痕。
+
+    R (3,3) / t (3,) / rvec (3,) / rotation_angle_deg / baseline_mm:语义同
+    StereoInit(X_cam2 = R @ X_cam1 + t,t 单位 mm,baseline = ‖t‖)。
+    per_pair_rms (N,) 与输入 pairs 行序一一对应(float64 回代);rms_reproj
+    为 pooled 口径(全部对两路平方欧氏残差均值的平方根,非逐对简写平均)。
+    flip_log 顶层固定含 "train" 键(本引擎即 train 侧语义;test 侧不调它)。
+    solver 如实标注解的来源("pnp_median" 初值 | "scipy" 精化);solver_meta
+    留收敛判定与雅可比组合依据,不静默(T-03-06)。
+    """
+
+    R: np.ndarray
+    t: np.ndarray
+    rvec: np.ndarray
+    rotation_angle_deg: float
+    baseline_mm: float
+    per_pair_rms: np.ndarray
+    rms_reproj: float
+    flip_log: dict
+    solver: str
+    solver_meta: dict
+
+
+def refine_stereo(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
+                  init: StereoInit, refine_cfg: StereoRefineConfig) -> StereoResult:
+    """scipy 外参精化:θ = [6 外参 | 6×N 位姿] 联合最小二乘(STER-01)。
+
+    白话:固定两路内参,把「cam1→cam2 外参 6 个 + 每对棋盘位姿 6 个」装成
+    一个向量,交给 least_squares 的 trf(信赖域反射)+ lsmr(解稀疏线性
+    子问题)+ 解析稀疏雅可比联合优化;初值来自 PnP-median(pass-2)。
+
+    失败契约与 Phase 2 一致:数值路径异常如实上抛(中文),收敛判定依据
+    全进 solver_meta 不静默;loss 写死 linear(离群对由 03-03 剔除机制
+    处理,不引入鲁棒核把解压歪)。
+    """
+    uv1 = np.asarray(pairs.uv1, dtype=np.float64)
+    uv2 = np.asarray(pairs.uv2, dtype=np.float64)
+    objp = np.asarray(pairs.objp, dtype=np.float64)
+    n_pairs, n_points = uv1.shape[0], uv1.shape[1]
+    if (init.rvecs1.shape != (n_pairs, 3) or init.tvecs1.shape != (n_pairs, 3)
+            or not all(init.per_pair_ok)):
+        raise ValueError(
+            f"精化初值与观测不一致:初值 {init.rvecs1.shape} 对不上 {n_pairs} 个对,"
+            f"或存在 PnP 失败对(位姿初值缺失)。精化必须来自同一批对、全部对均有解"
+            f"的 pass-2 结果;失败对应先进剔除通道。"
+        )
+
+    theta0 = pack_theta(init.rvec, init.t, init.rvecs1, init.tvecs1)
+    residual_fn = make_residual_fn(objp, uv1, uv2, intr1.params, intr2.params)
+
+    # 每次评估把 0.5·r·r 追加进代价轨迹(与 scipy 的代价定义一致),
+    # 供实用收敛判定的尾部窗口使用(照 intrinsic/solve.py 体例)。
+    cost_trace: list[float] = []
+
+    def traced_residual(theta: np.ndarray) -> np.ndarray:
+        r = residual_fn(theta)
+        cost_trace.append(0.5 * float(r @ r))
+        return r
+
+    sol = least_squares(
+        traced_residual, theta0,
+        jac=make_jacobian_fn(objp, uv1, uv2, intr1.params, intr2.params),
+        # 不传稀疏结构矩阵参数:jac 为 callable 时 scipy 对它静默忽略(死计算);
+        # 稀疏性利用只经「callable jac 返回 csr + tr_solver 解稀疏子问题」
+        # 这一条真实机制(见 make_jacobian_fn)。
+        method=refine_cfg.method, tr_solver="lsmr", x_scale="jac",
+        # 离群对由 03-03 的剔除机制处理,不引入鲁棒核(loss 写死 linear;
+        # 若未来需要鲁棒核走配置化扩展,不在这里塞分支)
+        loss="linear",
+        max_nfev=refine_cfg.max_nfev,
+        ftol=refine_cfg.ftol, xtol=refine_cfg.xtol, gtol=refine_cfg.gtol)
+
+    rvec_rel, t_rel, rvecs_j, tvecs_j = unpack_theta(sol.x)
+    R_rel, _ = cv2.Rodrigues(rvec_rel)
+
+    # 最终位姿逐对 RMS 重算与 pooled 指标(float64 回代,只经 models;
+    # 绝不用 OpenCV 返回值当指标)。
+    p1 = np.asarray(intr1.params, dtype=np.float64).ravel()
+    p2 = np.asarray(intr2.params, dtype=np.float64).ravel()
+    per_pair_rms = np.empty(n_pairs, dtype=np.float64)
+    sq_total = 0.0
+    for j in range(n_pairs):
+        x1, _ = models.transform_to_camera(objp, rvecs_j[j], tvecs_j[j])
+        x2 = x1 @ R_rel.T + t_rel
+        d1 = models.project(x1, p1) - uv1[j]
+        d2 = models.project(x2, p2) - uv2[j]
+        sq_points = np.sum(d1 * d1, axis=1) + np.sum(d2 * d2, axis=1)
+        per_pair_rms[j] = float(np.sqrt(sq_points.mean()))
+        sq_total += float(sq_points.sum())
+    rms_reproj = float(np.sqrt(sq_total / (2 * n_pairs * n_points)))
+
+    tail = _tail_improvement(cost_trace)
+    meta = {
+        "path": "stereo_refine", "method": refine_cfg.method,
+        "tr_solver": "lsmr", "x_scale": "jac", "loss": "linear",
+        "status": int(sol.status), "nfev": int(sol.nfev), "njev": int(sol.njev),
+        "final_cost": float(sol.cost), "tail_improvement": float(tail),
+        "n_cost_evals": len(cost_trace),
+        "converged": _is_practically_converged(int(sol.status), tail),
+        # 雅可比组合留痕(T-03-06 不静默;决策 1 的路线声明)
+        "jacobian": "analytic-jac, no sparsity",
+    }
+    return StereoResult(
+        R=np.asarray(R_rel, dtype=np.float64), t=np.asarray(t_rel, dtype=np.float64),
+        rvec=np.asarray(rvec_rel, dtype=np.float64),
+        rotation_angle_deg=float(np.degrees(np.linalg.norm(rvec_rel))),
+        baseline_mm=float(np.linalg.norm(t_rel)),
+        per_pair_rms=per_pair_rms, rms_reproj=rms_reproj,
+        flip_log={}, solver="scipy", solver_meta=meta)
+
+
+def solve_stereo(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
+                 cfg: StereoCalibConfig) -> StereoResult:
+    """双目求解编排入口(03-03 唯一消费它):全配置进、终解出。
+
+    内部两遍法管线:pass-1 pnp_median(原始角点,离散度防线关——翻转对
+    未消歧时离散度高恰恰是消歧要修的东西)→ disambiguate_pairs(配置
+    flip_ratio)→ pass-2 pnp_median(消歧后角点,离散度防线按配置)→
+    cfg.stereo.refine.enabled 时 refine_stereo,否则直接组装初值版
+    StereoResult(solver 如实标 "pnp_median")。剔除循环内的 fast 路径由
+    03-03 先 deepcopy 配置置 refine.enabled=False 再入(精化不进循环)。
+    flip_log 顶层固定含 "train" 键(本函数即 train 侧语义;test 侧不调它),
+    结构 {"train": {"pass2_flipped": int, "pair_ids": [...]}}。
+    """
+    stereo = cfg.stereo
+    pass1 = pnp_median(pairs, intr1, intr2, None)
+    pairs2, flip = disambiguate_pairs(pairs, intr1, intr2, pass1, stereo.flip_ratio)
+    pass2 = pnp_median(pairs2, intr1, intr2, stereo.median_spread_max_deg)
+    flip_log = {"train": flip}
+
+    if not all(pass2.per_pair_ok):
+        failed = [gid for gid, ok in zip(pairs.image_ids, pass2.per_pair_ok) if not ok]
+        raise ValueError(
+            f"双目求解失败:{len(failed)} 个对在消歧后仍解不出 PnP 位姿"
+            f"(group_id:{failed})——精化没有位姿初值,硬算必错。请把它们"
+            f"加入 stereo.exclude_pairs 手动剔除清单,或检查角点数据质量。"
+        )
+
+    if stereo.refine.enabled:
+        return replace(refine_stereo(pairs2, intr1, intr2, pass2, stereo.refine),
+                       flip_log=flip_log)
+    # 初值出口(精化开关关闭):pass-2 结果原样组装,pooled RMS = 逐对
+    # RMS 的平方均值开根(等角点数下与 pooled 公式一致)。
+    pooled = float(np.sqrt(np.mean(pass2.per_pair_rms ** 2)))
+    return StereoResult(
+        R=pass2.R, t=pass2.t, rvec=pass2.rvec,
+        rotation_angle_deg=pass2.rotation_angle_deg, baseline_mm=pass2.baseline_mm,
+        per_pair_rms=pass2.per_pair_rms, rms_reproj=pooled,
+        flip_log=flip_log, solver="pnp_median",
+        solver_meta={"path": "pnp_median", "spread_deg": pass2.spread_deg,
+                     "n_valid": pass2.n_valid})
