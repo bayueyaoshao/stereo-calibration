@@ -15,3 +15,11 @@
   让本计划的 diff 混入无关文件。
 - **建议:** 后续 wave(或 Phase 3 收尾)统一跑一次 `ruff check --fix --unsafe-fixes`
   或在 pyproject 里显式冻结 ruff 版本/规则集,避免基线漂移。
+
+### 2026-10-24 · 03-03 执行期 · 上述 5 处 ruff 告警复核(未变化,仍未修)
+
+- **发现于:** Task 3 收尾全仓 `uv run ruff check .`(5 处,同上一条:RUF007 × 1
+  + C408 × 4,均在 Phase 1 旧测试文件)。`git log` 复核两文件仍非本计划触碰
+  (`45a6b75` / `df044e0` 之后无改动),按 Scope Boundary 不修。
+- **本计划侧状态:** 03-03 全部新建/改动文件 ruff 干净;全量测试 191 passed。
+
