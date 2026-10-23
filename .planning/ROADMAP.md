@@ -92,7 +92,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-02-PLAN.md — 求解引擎:PnP-median 初值 + 两遍法消歧 + scipy 外参精化(解析稀疏雅可比),真实 112 对 train 验收(STER-01/02)
+- [x] 03-02-PLAN.md — 求解引擎:PnP-median 初值 + 两遍法消歧 + scipy 外参精化(解析稀疏雅可比),真实 112 对 train 验收(STER-01/02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -108,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 1/4 | In Progress|  |
+| 3. 模块3 双目标定 | 2/4 | In Progress|  |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*
