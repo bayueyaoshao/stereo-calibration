@@ -1,3 +1,17 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: planning
+last_updated: "2026-10-23T12:50:30.293Z"
+progress:
+  total_phases: 3
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+---
+
 # STATE: 双目相机标定生产工具
 
 ## Project Reference
@@ -30,6 +44,7 @@
 ## Accumulated Context
 
 ### Decisions
+
 - 角点:SB 主路线(严禁二次亚像素)+ classic 兜底(窗口从本帧方格像素边长推导)
 - 内参:M2 模型,calibrateCameraExtended 初值 + scipy least_squares 精化,RMS float64 回代
 - 双目:禁用 cv2.stereoCalibrate;PnP-median 初值 + 外参精化
@@ -37,9 +52,11 @@
 - 参考工程只读:`/home/lx/Works/src/lx/github/intrinsic-calibration`、`/home/lx/Works/src/bolight_robot/vvd_daq/multi_cameras`
 
 ### TODOs (from roadmap)
+
 - Phase 1 规划与实现(含 INFRA 工程基础)
 
 ### Blockers
+
 - None
 
 ## Session Continuity
