@@ -230,7 +230,9 @@ def _parse_subpix(raw: dict) -> SubpixConfig:
     cfg = SubpixConfig()
     section = _check_is_dict(raw.get("subpix", {}), "preprocess.corners.subpix")
     granularity = section.get("window_granularity", cfg.window_granularity)
-    if granularity not in _ALLOWED_GRANULARITY:
+    # 先判 str 再做集合成员检查:容器型 yaml 值(如 [frame])不可哈希,
+    # 直接 in set 会抛 TypeError(unhashable)击穿 CLI 异常网(WR-01)
+    if not isinstance(granularity, str) or granularity not in _ALLOWED_GRANULARITY:
         _fail("preprocess.corners.subpix.window_granularity", granularity,
               f"只能是 {' 或 '.join(sorted(_ALLOWED_GRANULARITY))}")
     min_win = section.get("min_win", cfg.min_win)
@@ -306,7 +308,9 @@ def _parse_refine(raw: dict) -> RefineConfig:
               "必须是 true 或 false(OpenCV 初值之后是否做 scipy 联合精化)")
 
     method = section.get("method", cfg.method)
-    if method not in _ALLOWED_REFINE_METHODS:
+    # 先判 str 再做集合成员检查:容器型 yaml 值(如 [trf])不可哈希,
+    # 直接 in set 会抛 TypeError(unhashable)击穿 CLI 异常网(WR-01)
+    if not isinstance(method, str) or method not in _ALLOWED_REFINE_METHODS:
         _fail("intrinsic.refine.method", method,
               f"只能是 {' 或 '.join(sorted(_ALLOWED_REFINE_METHODS))}"
               f"('lm' 只支持稠密雅可比,本工程走稀疏路径,直接拒收防呆)")
