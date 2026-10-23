@@ -84,7 +84,23 @@ Plans:
   3. test 集验证链路端到端跑通:角点序 180° 消歧 → undistortPoints 去畸变 → DLT 三角化 → 板系反变换 → 最远两角点距离 vs 真值 305.16mm(√149×25,2026-10-24 修正原 307.45 算术误差),残差 RMS 为毫米级(< 5mm,预期 ~1–2mm)
   4. 输出双目标定报告:每帧距离残差 + 整体 RMS
 
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — 配置 stereo 段(决策 #1-#9 锁定)+ 双目对装载(连接键/行序锁/按名读内参)+ 合成双目几何夹具(STER-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02-PLAN.md — 求解引擎:PnP-median 初值 + 两遍法消歧 + scipy 外参精化(解析稀疏雅可比),真实 112 对 train 验收(STER-01/02)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-03-PLAN.md — 评估链(消歧 → per-frame 2 视图 BA → undist/DLT → 板系对角距离残差)+ Pattern 7 产物契约 + 离群剔除编排 + 源码防线(STER-01/03/04)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 03-04-PLAN.md — CLI 一条命令 + 真实数据全量生产运行 + 四条成功标准验收(STER-01/02/03/04)
 
 ## Progress
 
@@ -92,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 0/? | Not started | - |
+| 3. 模块3 双目标定 | 0/4 | Not started | - |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*
