@@ -81,7 +81,7 @@ Plans:
 
   1. 一条命令完成双目外参求解:每共视图两路 solvePnP → 相对位姿(Rodrigues 向量取中位)→ scipy 外参精化,全程不调用 `cv2.stereoCalibrate`
   2. 输出双目外参 R/T(cam1 为参考系)及 baseline 距离,与支架物理结构量级相符
-  3. test 集验证链路端到端跑通:角点序 180° 消歧 → undistortPoints 去畸变 → DLT 三角化 → 板系反变换 → 最远两角点距离 vs 真值 307.45mm,残差 RMS 为毫米级(< 5mm,预期 ~1–2mm)
+  3. test 集验证链路端到端跑通:角点序 180° 消歧 → undistortPoints 去畸变 → DLT 三角化 → 板系反变换 → 最远两角点距离 vs 真值 305.16mm(√149×25,2026-10-24 修正原 307.45 算术误差),残差 RMS 为毫米级(< 5mm,预期 ~1–2mm)
   4. 输出双目标定报告:每帧距离残差 + 整体 RMS
 
 **Plans**: TBD

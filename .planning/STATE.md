@@ -51,7 +51,7 @@ Plan: 1 of 4
 - 角点:SB 主路线(严禁二次亚像素)+ classic 兜底(窗口从本帧方格像素边长推导)
 - 内参:M2 模型,calibrateCameraExtended 初值 + scipy least_squares 精化,RMS float64 回代
 - 双目:禁用 cv2.stereoCalibrate;PnP-median 初值 + 外参精化
-- 双目验证指标:test 集最远两角点物理距离残差 RMS,真值 √(10²+7²)×25mm ≈ 307.45mm
+- 双目验证指标:test 集最远两角点物理距离残差 RMS,真值 √(10²+7²)×25mm = √149×25 ≈ 305.16mm(2026-10-24 修正原 307.45 算术误差)
 - 参考工程只读:`/home/lx/Works/src/lx/github/intrinsic-calibration`、`/home/lx/Works/src/bolight_robot/vvd_daq/multi_cameras`
 
 ### TODOs (from roadmap)
