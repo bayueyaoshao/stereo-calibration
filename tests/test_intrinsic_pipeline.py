@@ -1,20 +1,35 @@
 """装载契约与 float64 指标尺测试:合成 npz 装载三重防线 + 真值噪声 RMS。
 
-本计划(02-01)只放装载契约与 metrics 用例;端到端(合成 npz → 进程内跑
-intrinsic 命令 → 产物契约)由 02-03 扩展。合成路线照 RESEARCH Code Examples:
-Phase 2 消费的是角点数组,不需要渲染图像——用真值参数 + 随机位姿投影合成
-(V,88,2) 角点,按 Phase 1 八数组契约 np.savez(allow_pickle=False 可读),
-秒级完成(图像文件仅 image_size 派生需要,用最小噪声图即可)。
+02-01 放装载契约与 metrics 用例;02-03 扩展落盘层 writer 单元契约与
+端到端(合成 npz → 进程内调 run_intrinsic → 产物全契约 + 离群行为 +
+清理/只读防线)。合成路线照 RESEARCH Code Examples:Phase 2 消费的是
+角点数组——用真值参数 + 随机位姿 cv2.projectPoints 合成 (V,88,2) 角点,
+按 Phase 1 八数组契约 np.savez(allow_pickle=False 可读),秒级完成
+(图像文件仅 image_size 派生需要,渲染真实小图即可)。
 """
 
+import csv
+import json
 import pathlib
 
 import cv2
 import numpy as np
 import pytest
 
+from stereo_calib.intrinsic.artifacts import (
+    write_extrinsics_npz,
+    write_intrinsics_json,
+    write_per_frame_csv,
+    write_report_md,
+    write_residuals_npz,
+)
 from stereo_calib.intrinsic.metrics import compute_metrics
-from stereo_calib.intrinsic.models import project, transform_to_camera
+from stereo_calib.intrinsic.models import (
+    INTRINSIC_NAMES,
+    intrinsics_matrix,
+    project,
+    transform_to_camera,
+)
 from stereo_calib.intrinsic.observation import load_views
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points
@@ -207,3 +222,457 @@ def test_metrics_and_observation_source_guards():
     obs_src = pathlib.Path("src/stereo_calib/intrinsic/observation.py").read_text(encoding="utf-8")
     assert "np.load(" not in obs_src, "装载必须经 load_corners(allow_pickle=False 防线)"
     assert "from stereo_calib.preprocess.artifacts import" in obs_src, "必须复用 Phase 1 读取入口"
+
+
+# ===========================================================================
+# 02-03 任务 1:落盘层 writer 单元契约(tmp_path roundtrip)
+# ===========================================================================
+
+# intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
+_JSON_KEYS = {
+    "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
+    "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
+    "dropped_frames", "solver_meta", "board", "config_snapshot",
+}
+
+
+def test_write_intrinsics_json_roundtrip(tmp_path):
+    """写 → 读回逐字段断言:字段全集、params 按名、K/D 形状与数值冗余一致。"""
+    dropped = [{"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
+    out = write_intrinsics_json(
+        tmp_path / "cam1" / "intrinsics.json", cam=1, image_size=(2560, 1440),
+        params=_TRUE_PARAMS, K=intrinsics_matrix(_TRUE_PARAMS), D=_TRUE_PARAMS[4:9],
+        solver="scipy", refine_enabled=True, rms_train_overall=0.3316,
+        rms_test_overall=0.2389, n_views_train=141, n_views_test=15,
+        dropped_frames=dropped, solver_meta={"status": 0, "opencv_rms": 2.5782},
+        board=BoardSpec(), config_snapshot={"intrinsic": {"rms_test_max": 1.0}})
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert set(payload) == _JSON_KEYS, "intrinsics.json 字段集必须与 Pattern 7 契约全等"
+    assert list(payload["params"]) == list(INTRINSIC_NAMES), "params 必须按名(模块 3 的固定接口)"
+    for name, v in zip(INTRINSIC_NAMES, _TRUE_PARAMS):
+        assert payload["params"][name] == pytest.approx(float(v))
+    K = np.asarray(payload["K"])
+    assert K.shape == (3, 3)
+    assert K[0, 0] == pytest.approx(1850.0) and K[0, 2] == pytest.approx(1280.0)
+    assert K[1, 1] == pytest.approx(1840.0) and K[1, 2] == pytest.approx(720.0)
+    assert payload["D"] == pytest.approx([-0.40, 0.23, 1.1e-4, -3.8e-5, -0.08])
+    assert payload["image_size"] == [2560, 1440], "image_size 必须是 [宽, 高]"
+    assert payload["cam"] == 1
+    assert payload["solver"] == "scipy" and payload["refine_enabled"] is True
+    assert payload["n_views_train"] == 141 and payload["n_views_test"] == 15
+    assert payload["dropped_frames"] == [
+        {"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
+    assert payload["solver_meta"]["opencv_rms"] == pytest.approx(2.5782)
+    assert payload["board"]["cols"] == 11 and payload["board"]["square_size_mm"] == 25.0
+
+
+def test_write_residuals_npz_roundtrip(tmp_path):
+    """残差 npz:allow_pickle=False 可读,dtype/形状/对账列一致,NaN 原样通过。"""
+    residuals = np.arange(2 * 4 * 2, dtype=np.float64).reshape(2, 4, 2)
+    residuals[1, 0, 0] = np.nan  # test 份失败帧留痕语义:NaN 必须原样落盘读回
+    per_view = np.array([0.5, np.nan])
+    out = write_residuals_npz(tmp_path / "train_residuals.npz",
+                              ["003_cam1", "004_cam1"], residuals, per_view)
+    data = np.load(out, allow_pickle=False)
+    assert data["residuals"].shape == (2, 4, 2) and data["residuals"].dtype == np.float64
+    assert data["per_view_rms"].shape == (2,) and data["per_view_rms"].dtype == np.float64
+    assert [str(s) for s in data["image_ids"]] == ["003_cam1", "004_cam1"]
+    assert data["residuals"][0].tolist() == residuals[0].tolist()
+    assert np.isnan(data["residuals"][1, 0, 0]) and np.isnan(data["per_view_rms"][1])
+
+
+def test_write_extrinsics_npz_roundtrip(tmp_path):
+    """外参 npz(诊断用):allow_pickle=False 可读,(V,3) float64 + 对账列。"""
+    rvecs = np.linspace(-0.3, 0.3, 6, dtype=np.float64).reshape(2, 3)
+    tvecs = np.stack([np.arange(3, dtype=np.float64),
+                      np.arange(3, dtype=np.float64) + 10.0])
+    out = write_extrinsics_npz(tmp_path / "extrinsics.npz",
+                               ["003_cam1", "004_cam1"], rvecs, tvecs)
+    data = np.load(out, allow_pickle=False)
+    assert data["rvecs"].shape == (2, 3) and data["rvecs"].dtype == np.float64
+    assert data["tvecs"].shape == (2, 3) and data["tvecs"].dtype == np.float64
+    assert [str(s) for s in data["image_ids"]] == ["003_cam1", "004_cam1"]
+    assert data["rvecs"].tolist() == rvecs.tolist()
+
+
+def test_write_per_frame_csv_header_and_bom(tmp_path):
+    """逐帧 CSV:表头列序恰为六列契约 + utf-8-sig BOM(Excel 双击直开)。"""
+    rows = [{"image_id": "003_cam1", "split": "train", "source": "sb",
+             "rms": "0.1234", "dropped": "True",
+             "note": "第1轮剔除:RMS 15.200 超阈值 0.350"}]
+    out = write_per_frame_csv(tmp_path / "per_frame_cam1.csv", rows)
+    assert out.read_bytes().startswith(b"\xef\xbb\xbf"), "必须 utf-8-sig(带 BOM)"
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == ["image_id", "split", "source", "rms", "dropped", "note"]
+        got = list(reader)
+    assert got[0]["image_id"] == "003_cam1"
+    assert got[0]["dropped"] == "True"
+    assert "剔除" in got[0]["note"], "剔除行的中文说明必须原样落盘"
+
+
+def test_write_report_md_sections(tmp_path):
+    """报告:含指标对比(PASS/FAIL 判定)、按名参数表、离群留痕段与「无」占位。"""
+    params = {n: float(v) for n, v in zip(INTRINSIC_NAMES, _TRUE_PARAMS)}
+
+    def _summary(cam, rms_test, dropped, loop):
+        return {"cam": cam, "image_size": (2560, 1440), "params": params,
+                "solver": "scipy", "refine_enabled": True,
+                "rms_train_overall": 0.33, "rms_test_overall": rms_test,
+                "n_views_train": 10, "n_views_train_initial": 12, "n_views_test": 4,
+                "dropped_frames": dropped, "outlier_loop": loop,
+                "train_per_view_rms": [0.07] * 10,
+                "test_per_view_rms": [0.08, 0.06, float("nan"), 0.09]}
+
+    summaries = [
+        _summary(1, 0.24, [], "第 1 轮无超阈帧,剔除循环收敛(共剔除 0 帧)"),
+        _summary(2, 1.5, [], "第 1 轮无超阈帧,剔除循环收敛(共剔除 0 帧)"),
+    ]
+    out = write_report_md(tmp_path / "report.md", summaries, 1.0, {"intrinsic": {}})
+    text = out.read_text(encoding="utf-8")
+    assert "离群" in text, "报告必须有离群留痕段(INTR-04)"
+    assert "PASS" in text and "FAIL" in text, "按 rms_test_max 给两路判定"
+    assert "cam1" in text and "cam2" in text
+    assert "fx" in text and "p2" in text, "参数表必须按名列全 9 项"
+    assert "无(本轮运行没有帧超过离群阈值)" in text, "无剔除时离群表写「无」"
+    assert "中位" in text and "per_frame_cam1.csv" in text, "逐帧摘要指向 CSV 明细"
+    assert "config_snapshot" in text, "配置快照留痕进附录"
+
+
+# ===========================================================================
+# 02-03 任务 3:合成 npz e2e(全契约 + 离群行为 + 清理/只读防线)
+# ===========================================================================
+
+# 合成真值(与 02-02 真值恢复测试同源量级:fx/fy 差 10、强径向 + 弱切向)
+_K_TRUE = np.array([[1850.0, 0.0, 1280.0], [0.0, 1840.0, 720.0], [0.0, 0.0, 1.0]])
+_D_TRUE = np.array([-0.40, 0.23, 1.1e-4, -3.8e-5, -0.08])
+_IMG_SHAPE = (1440, 2560)  # numpy (高, 宽);imread 派生的 image_size 应为 (2560, 1440)
+
+# e2e 配置:intrinsic 段全键显式(与 config.yaml 同布局)。min_views 显式取 2:
+# 本计划 e2e 的 test 划分只有 4 帧(装载下限按 10 会把考卷挡在门外),
+# 剔除保险丝余量另由 max_drop_fraction 兜底(12 帧下限 9.6,可剔 2 帧)。
+_E2E_CONFIG_YAML = """\
+board:
+  board_type: "chessboard"
+  cols: 11
+  rows: 8
+  square_size_mm: 25.0
+  unit: "mm"
+data:
+  train: "data/train"
+  test: "data/test"
+output_root: "output"
+cv2_threads: 0
+preprocess:
+  max_workers: 1
+  corners:
+    classic_flags: [adaptive_thresh, normalize_image]
+    sb_flags: 0
+    sb_fallback_classic: true
+    subpix: {window_granularity: frame, min_win: 3, max_iter: 30, epsilon: 0.01}
+  copy_fail_originals: false
+  visualization: {jpeg_quality: 90}
+intrinsic:
+  refine:
+    enabled: true
+    method: "trf"
+    max_nfev: 300
+    ftol: 1.0e-10
+    xtol: 1.0e-12
+    gtol: 1.0e-10
+  outlier:
+    enabled: true
+    rms_multiplier: 5.0
+    max_drop_fraction: 0.2
+    max_iterations: 3
+    min_views: 2
+  rms_test_max: 1.0
+  exclude_images: []
+"""
+
+
+def _tree_snapshot(root: pathlib.Path) -> dict:
+    """INFRA-03:data/ 树逐文件 (mtime_ns, size) 快照,运行前后必须逐字节不变。"""
+    return {
+        str(p.relative_to(root)): (p.stat().st_mtime_ns, p.stat().st_size)
+        for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def _synth_npz(path: pathlib.Path, cam: int, split: str, n_views: int, seed: int,
+               img_path: pathlib.Path, board: BoardSpec,
+               bad_idx: int | None = None) -> list[str]:
+    """按 Phase 1 八数组契约合成一份角点 npz(真值投影 + 0.05px 噪声)。
+
+    detected 全 True、source 全 "sb"、sq_px 全 18.0、win_size 全 5.0;
+    paths 指向渲染出的真实小图(image_size 派生要 imread,Plan 指定)。
+    bad_idx 非 None 时给该帧 uv 加恒定 +15px 偏移(离群行为用例的坏帧)。
+    """
+    rng = np.random.default_rng(seed)
+    objp_flat = build_object_points(board).reshape(-1, 1, 3)
+    uvs = []
+    for _ in range(n_views):
+        rvec = rng.normal(0.0, 0.3, 3)
+        tvec = np.array([rng.normal(0.0, 50.0), rng.normal(0.0, 50.0),
+                         rng.uniform(400.0, 900.0)])
+        proj, _ = cv2.projectPoints(objp_flat, rvec, tvec, _K_TRUE, _D_TRUE)
+        uvs.append(proj.reshape(-1, 2) + rng.normal(0.0, 0.05, (88, 2)))
+    uv = np.asarray(uvs, dtype=np.float64)
+    if bad_idx is not None:
+        # 坏帧注入用 15px 量级的逐角点散布,而非恒定 +15px 偏移:恒定偏移等价于
+        # 棋盘的小平移,会被该帧自己的位姿解几乎完美吸收(实测注入后该帧逐帧
+        # RMS 仅 0.2px,永远到不了剔除阈值)——plan 原文的恒定偏移注入模型无法
+        # 触发剔除机制,按同量级"该帧角点整体劣化"修正(口径记录 SUMMARY)。
+        uv[bad_idx] += np.random.default_rng(99).normal(0.0, 15.0, (88, 2))
+    ids = [f"{split}{k:03d}_cam{cam}" for k in range(n_views)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        image_ids=np.asarray(ids, dtype=np.str_),
+        paths=np.asarray([str(img_path)] * n_views, dtype=np.str_),
+        uv=uv,
+        objp=build_object_points(board),
+        source=np.asarray(["sb"] * n_views, dtype="<U16"),
+        detected=np.ones(n_views, dtype=bool),
+        sq_px=np.full(n_views, 18.0, dtype=np.float64),
+        win_size=np.full(n_views, 5.0, dtype=np.float64),
+    )
+    return ids
+
+
+def _build_run_tree(tmp_path: pathlib.Path, make_chessboard_image, *,
+                    bad_train_idx: int | None = None,
+                    bad_test_idx: int | None = None) -> dict:
+    """搭最小运行树:渲染真实小图进 data/ + 合成 npz 进 output/ + 写 config.yaml。
+
+    返回 {f"cam{cam}_{split}": image_ids} 供断言对账;两路 train 种子取
+    5 种子探测里精度居中的 7 与 3(见 test_e2e_full_contract 的阈值注释)。
+    """
+    board = BoardSpec()
+    img_paths: dict[int, pathlib.Path] = {}
+    for cam in (1, 2):
+        img, _corners, _sq = make_chessboard_image(image_size=_IMG_SHAPE)
+        p = tmp_path / "data" / "train" / "ts1" / "leaf1" / f"cam{cam}.jpg"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(str(p), img), f"渲染小图写盘失败:{p}"
+        img_paths[cam] = p
+
+    ids: dict[str, list[str]] = {}
+    for cam in (1, 2):
+        train_seed = (7, 3)[cam - 1]
+        ids[f"cam{cam}_train"] = _synth_npz(
+            tmp_path / "output" / "train" / f"cam{cam}_train.npz",
+            cam, "train", 12, train_seed, img_paths[cam], board,
+            bad_idx=bad_train_idx if cam == 1 else None)
+        ids[f"cam{cam}_test"] = _synth_npz(
+            tmp_path / "output" / "test" / f"cam{cam}_test.npz",
+            cam, "test", 4, 200 + cam, img_paths[cam], board,
+            bad_idx=bad_test_idx if cam == 1 else None)
+    (tmp_path / "config.yaml").write_text(_E2E_CONFIG_YAML, encoding="utf-8")
+    return ids
+
+
+def _run_intrinsic_in(tmp_path: pathlib.Path) -> None:
+    """进程内直调 run_intrinsic(不是 typer 命令,CLI 留 02-04)。"""
+    from stereo_calib.intrinsic.pipeline import run_intrinsic
+    from stereo_calib.io.config import load_config
+    run_intrinsic(load_config(tmp_path / "config.yaml"))
+
+
+@pytest.fixture
+def intrinsic_run(tmp_path, monkeypatch, make_chessboard_image):
+    """干净合成运行:12+4 视图 × 两路,无坏帧 → 全契约断言的公共夹具。"""
+    ids = _build_run_tree(tmp_path, make_chessboard_image)
+    monkeypatch.chdir(tmp_path)
+    before = _tree_snapshot(tmp_path / "data")
+    _run_intrinsic_in(tmp_path)
+    return tmp_path / "output", before, ids
+
+
+# 精化后参数对真值的判别口径(12 视图 / 0.05px 噪声的噪声限,5 个种子
+# 实测:seed 3/7/42/101/202 下 fx..cy 相对误差最大 8.2e-4;k1/k2/k3 的
+# 高阶畸变项弱约束,相对误差可到 1.3e-3 ~ 1.6e-2,绝对误差最大 1.3e-3;
+# p1/p2 真值 ~1e-4 量级、像素效应远低于检测噪声(02-02 同款结论),
+# 相对误差无判别力,按绝对误差 1e-4 判)。plan 原文的"逐项相对 < 1e-3"
+# 对高阶畸变项物理不可达,口径修正记录在 SUMMARY 偏差节。
+_REL_TIGHT = ("fx", "fy", "cx", "cy")
+_ABS_DIST = {"k1": 1e-3, "k2": 2e-3, "k3": 2e-3, "p1": 1e-4, "p2": 1e-4}
+
+
+def _assert_params_recover_truth(params: dict) -> None:
+    for name in _REL_TIGHT:
+        err = abs(params[name] - {"fx": 1850.0, "fy": 1840.0, "cx": 1280.0, "cy": 720.0}[name])
+        assert err / {"fx": 1850.0, "fy": 1840.0, "cx": 1280.0, "cy": 720.0}[name] < 1e-3, \
+            f"{name} 相对误差 {err:.3e} 超出噪声限带(精化未生效?)"
+    truth = dict(zip(["k1", "k2", "p1", "p2", "k3"], _D_TRUE))
+    for name, tol in _ABS_DIST.items():
+        err = abs(params[name] - truth[name])
+        assert err < tol, f"{name} 绝对误差 {err:.3e} 超出噪声限带 {tol}(精化未生效?)"
+
+
+def test_e2e_full_contract_clean_run(intrinsic_run):
+    """e2e 全契约:intrinsics.json 字段全集 == Pattern 7 清单,params 对真值
+    恢复到噪声限带,image_size 与渲染图一致,RMS 有限正,dropped_frames 空。"""
+    out, _before, _ids = intrinsic_run
+    for cam in (1, 2):
+        payload = json.loads(
+            (out / "intrinsic" / f"cam{cam}" / "intrinsics.json").read_text(encoding="utf-8"))
+        assert set(payload) == _JSON_KEYS, "字段全集必须与 Pattern 7 契约全等(Phase 3 固定接口)"
+        assert list(payload["params"]) == list(INTRINSIC_NAMES)
+        _assert_params_recover_truth(payload["params"])
+        assert payload["cam"] == cam
+        assert payload["image_size"] == [2560, 1440], "image_size 必须与渲染图一致"
+        for key in ("rms_train_overall", "rms_test_overall"):
+            v = payload[key]
+            assert np.isfinite(v) and v > 0, f"{key} 必须是有限正数,实际 {v}"
+        assert 0.03 < payload["rms_train_overall"] < 0.2, "干净合成数据 train RMS 应落在噪声带"
+        assert payload["dropped_frames"] == [], "无坏帧时不得误剔"
+        assert payload["n_views_train"] == 12 and payload["n_views_test"] == 4
+        assert payload["solver"] == "scipy" and payload["refine_enabled"] is True
+        assert payload["config_snapshot"]["intrinsic"]["rms_test_max"] == 1.0
+
+
+def test_e2e_artifacts_layout_and_report(intrinsic_run):
+    """产物布局:每路 cam{n}/ 四件 + 根下逐帧 CSV(16 行)与 report.md;报告
+    含两路、PASS 判定与离群段;CSV 列序/utf-8-sig/split 分布正确。"""
+    out, _before, _ids = intrinsic_run
+    root = out / "intrinsic"
+    for cam in (1, 2):
+        cam_dir = root / f"cam{cam}"
+        for name in ("intrinsics.json", "train_residuals.npz",
+                     "test_residuals.npz", "extrinsics.npz"):
+            assert (cam_dir / name).is_file(), f"cam{cam} 缺产物 {name}"
+        csv_path = root / f"per_frame_cam{cam}.csv"
+        assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf"), "逐帧 CSV 必须 utf-8-sig"
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            assert reader.fieldnames == ["image_id", "split", "source", "rms", "dropped", "note"]
+            rows = list(reader)
+        assert len(rows) == 16, f"逐帧行数必须 == 12 train + 4 test,实际 {len(rows)}"
+        assert [r["split"] for r in rows] == ["train"] * 12 + ["test"] * 4
+        assert all(r["dropped"] == "False" for r in rows), "干净数据无人被剔"
+        assert all(r["source"] == "sb" for r in rows)
+        assert all(r["rms"] for r in rows), "干净数据所有帧都有有限 RMS"
+    report = (root / "report.md").read_text(encoding="utf-8")
+    assert "cam1" in report and "cam2" in report, "报告必须两路并排"
+    assert "PASS" in report, "干净运行两路都应判 PASS(阈值 1.0,RMS ~0.07)"
+    assert "FAIL" not in report
+    assert "离群" in report and "无(本轮运行没有帧超过离群阈值)" in report
+    assert "config_snapshot" in report
+
+
+def test_e2e_residuals_npz_alignment(intrinsic_run):
+    """残差/外参 npz:allow_pickle=False 可读,形状/dtype 正确,image_ids 与
+    JSON 的 n_views 对齐(行序契约对账列)。"""
+    out, _before, ids = intrinsic_run
+    for cam in (1, 2):
+        payload = json.loads(
+            (out / "intrinsic" / f"cam{cam}" / "intrinsics.json").read_text(encoding="utf-8"))
+        train_res = np.load(out / "intrinsic" / f"cam{cam}" / "train_residuals.npz",
+                            allow_pickle=False)
+        test_res = np.load(out / "intrinsic" / f"cam{cam}" / "test_residuals.npz",
+                           allow_pickle=False)
+        assert set(train_res.files) == {"image_ids", "residuals", "per_view_rms"}
+        assert train_res["residuals"].shape == (12, 88, 2)
+        assert train_res["residuals"].dtype == np.float64
+        assert train_res["per_view_rms"].shape == (12,)
+        assert [str(s) for s in train_res["image_ids"]] == ids[f"cam{cam}_train"]
+        assert len(train_res["image_ids"]) == payload["n_views_train"]
+        assert not np.isnan(train_res["residuals"]).any(), "train 残差恒全有限"
+        assert test_res["residuals"].shape == (4, 88, 2)
+        assert [str(s) for s in test_res["image_ids"]] == ids[f"cam{cam}_test"]
+        assert len(test_res["image_ids"]) == payload["n_views_test"]
+        extr = np.load(out / "intrinsic" / f"cam{cam}" / "extrinsics.npz", allow_pickle=False)
+        assert extr["rvecs"].shape == (12, 3) and extr["tvecs"].shape == (12, 3)
+        assert [str(s) for s in extr["image_ids"]] == ids[f"cam{cam}_train"]
+
+
+def test_e2e_solver_and_refine_contract(intrinsic_run):
+    """solver 留痕:solver=scipy、refine_enabled=True、solver_meta 收敛判定
+    依据齐全(status/nfev/final_cost/tail_improvement/converged,不静默)。"""
+    out, _before, _ids = intrinsic_run
+    for cam in (1, 2):
+        payload = json.loads(
+            (out / "intrinsic" / f"cam{cam}" / "intrinsics.json").read_text(encoding="utf-8"))
+        assert payload["solver"] == "scipy"
+        assert payload["refine_enabled"] is True
+        meta = payload["solver_meta"]
+        for key in ("status", "nfev", "final_cost", "tail_improvement", "converged"):
+            assert key in meta, f"solver_meta 缺 {key}(收敛判定必须留痕不静默)"
+        assert meta["path"] == "scipy_refine"
+        assert isinstance(meta["converged"], bool)
+
+
+def test_e2e_outlier_train_dropped_and_test_never(tmp_path, monkeypatch,
+                                                  make_chessboard_image):
+    """离群行为:train 注入 15px 量级坏帧(角点整体劣化,见 _synth_npz 注释)
+    → 自动剔除且留痕(image_id/轮次/阈值);test 注入同样坏帧 → 永不剔除
+    只标记(dropped 恒 False,高 RMS 如实记录)。"""
+    bad_train, bad_test = 7, 2
+    ids = _build_run_tree(tmp_path, make_chessboard_image,
+                          bad_train_idx=bad_train, bad_test_idx=bad_test)
+    monkeypatch.chdir(tmp_path)
+    _run_intrinsic_in(tmp_path)
+    out = tmp_path / "output"
+
+    payload = json.loads(
+        (out / "intrinsic" / "cam1" / "intrinsics.json").read_text(encoding="utf-8"))
+    dropped = payload["dropped_frames"]
+    bad_id = ids["cam1_train"][bad_train]
+    assert [d["image_id"] for d in dropped] == [bad_id], "恰剔除注入的坏帧,不误伤好帧"
+    assert dropped[0]["round"] == 1 and dropped[0]["threshold"] > 0, "剔除留痕必须含轮次与阈值"
+    assert dropped[0]["rms"] > dropped[0]["threshold"], "被剔帧的 RMS 必须超阈值"
+    assert all(d["image_id"] not in ids["cam1_test"] for d in dropped), "test 帧永不剔除"
+    assert payload["n_views_train"] == 11, "幸存数 = 12 - 1"
+    assert payload["rms_train_overall"] < 0.2, "剔掉坏帧后 train RMS 应回噪声带"
+
+    with open(out / "intrinsic" / "per_frame_cam1.csv", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    by_id = {r["image_id"]: r for r in rows}
+    assert by_id[bad_id]["dropped"] == "True", "CSV 剔除行必须标记 dropped=True"
+    assert "剔除" in by_id[bad_id]["note"] and by_id[bad_id]["note"], "剔除行必须有中文说明"
+    bad_test_id = ids["cam1_test"][bad_test]
+    assert by_id[bad_test_id]["dropped"] == "False", "坏 test 帧只标记,绝不剔除"
+    assert float(by_id[bad_test_id]["rms"]) > 1.0, "坏 test 帧的高 RMS 必须如实记录(标记语义)"
+    assert all(r["dropped"] == "False" for r in rows if r["split"] == "test")
+
+    # cam2 未注入坏帧:不受牵连,零剔除
+    payload2 = json.loads(
+        (out / "intrinsic" / "cam2" / "intrinsics.json").read_text(encoding="utf-8"))
+    assert payload2["dropped_frames"] == []
+
+
+def test_e2e_rerun_clears_stale_and_data_readonly(tmp_path, monkeypatch,
+                                                  make_chessboard_image):
+    """清理与只读防线:重跑前 output/intrinsic/ 下的 stale 残留随运行消失
+    (rmtree 固定覆盖);data/ 树快照运行前后逐字节一致(数据只读)。"""
+    _build_run_tree(tmp_path, make_chessboard_image)
+    monkeypatch.chdir(tmp_path)
+    before = _tree_snapshot(tmp_path / "data")
+    _run_intrinsic_in(tmp_path)
+
+    intrinsic_root = tmp_path / "output" / "intrinsic"
+    (intrinsic_root / "stale_leftover.json").write_text("{}", encoding="utf-8")
+    (intrinsic_root / "cam1" / "stale.npz").write_bytes(b"stale from previous run")
+    _run_intrinsic_in(tmp_path)  # 重跑:rmtree 应把整个 intrinsic 目录重建
+
+    assert not (intrinsic_root / "stale_leftover.json").exists(), "固定覆盖后残留必须消失"
+    assert not (intrinsic_root / "cam1" / "stale.npz").exists(), "子目录残留也必须消失"
+    assert (intrinsic_root / "cam1" / "intrinsics.json").is_file(), "重建后产物仍齐全"
+    assert (intrinsic_root / "report.md").is_file()
+    assert _tree_snapshot(tmp_path / "data") == before, "intrinsic 流程绝不允许改动 data/"
+
+
+def test_pipeline_and_artifacts_source_guards():
+    """源码防线:pipeline 零数学(投影/求解内部符号不得出现,只准编排);
+    artifacts 零数学且 JSON 契约字段表存在(字段全集测试已单独锁定)。"""
+    pipeline_src = pathlib.Path("src/stereo_calib/intrinsic/pipeline.py").read_text(encoding="utf-8")
+    for banned in ("_distort", "least_squares", "calibrateCameraExtended"):
+        assert banned not in pipeline_src, \
+            f"编排层不得出现 {banned}(数学只准经 models/solve 入口,零数学防线)"
+    for required in ("rmtree", "load_views", "solve_calibration",
+                     "score_pose_only", "compute_metrics", "median", "rms_multiplier"):
+        assert required in pipeline_src, f"编排层必须经 {required} 入口(编排只调模块入口)"
+    artifacts_src = pathlib.Path("src/stereo_calib/intrinsic/artifacts.py").read_text(encoding="utf-8")
+    for banned in ("_distort", "least_squares", "calibrateCameraExtended"):
+        assert banned not in artifacts_src, f"落盘层不得出现 {banned}(落盘零数学)"
