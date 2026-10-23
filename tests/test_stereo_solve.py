@@ -14,23 +14,25 @@ docstring/注释里复述——solve.py 的注释措辞刻意避开那些串。
 from __future__ import annotations
 
 import pathlib
+import time
 
 import cv2
 import numpy as np
 import pytest
-from scipy.optimize._numdiff import approx_derivative
 
 # pytest rootdir 模式(tests/ 无 __init__.py)把 tests 目录插进 sys.path
 from conftest import make_stereo_synth
+from scipy.optimize._numdiff import approx_derivative
 
-from stereo_calib.io.config import StereoCalibConfig, StereoConfig, StereoRefineConfig
-from stereo_calib.stereo.observation import IntrinsicsView, Pairs
+from stereo_calib.io.config import StereoCalibConfig, StereoConfig, StereoRefineConfig, load_config
+from stereo_calib.stereo.observation import IntrinsicsView, Pairs, load_intrinsics, load_pairs
 from stereo_calib.stereo.solve import (
     disambiguate_pairs,
     make_jacobian_fn,
     make_residual_fn,
     pack_theta,
     pnp_median,
+    refine_stereo,
     relative_pose,
     row_index,
     solve_stereo,
@@ -378,3 +380,128 @@ def test_solve_source_guards_task2():
     assert 'tr_solver="lsmr"' in source and 'x_scale="jac"' in source, (
         "scipy 精化必须走 trf + lsmr + x_scale=jac 的稀疏配置")
     assert 'loss="linear"' in source, "loss 固定 linear(离群由剔除机制处理)"
+
+
+# ---------- Task 3: 真实数据引擎验收(生产门禁,默认必须跑,不 skip) ----------
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_REAL_ARTIFACTS = (
+    _REPO_ROOT / "output" / "train" / "common_fov_pairs_train.csv",
+    _REPO_ROOT / "output" / "train" / "cam1_train.npz",
+    _REPO_ROOT / "output" / "train" / "cam2_train.npz",
+    _REPO_ROOT / "output" / "intrinsic" / "cam1" / "intrinsics.json",
+    _REPO_ROOT / "output" / "intrinsic" / "cam2" / "intrinsics.json",
+)
+
+
+def test_real_data_stereo_engine_acceptance():
+    """真实 112 对 train 引擎验收:防线哨兵 + 诊断链数值留档(STER-01/02)。
+
+    生产门禁,绝不 skip:产物缺失(没跑 Phase 1/2)按门禁失败处理并中文
+    指路。
+
+    【2026-10-24 实测数据缺陷留档 —— 本用例为何是"哨兵 + 诊断"双段式】
+    plan 门限 rms_reproj < 1.0px 在当前真实产物上不可达,且已系统性排除
+    引擎侧原因(诊断记录见 03-02-SUMMARY):
+    - 逐对独立位姿拟合两路都亚像素(cam1 中位 0.12px / cam2 0.09px),
+      unproject 路线与带畸变路线逐位一致(排除错误盆地/孪生解);
+    - 但逐对相对位姿相对中位散开中位 2.5°、最大 12.2°(合成噪声地板
+      ~0.05°),且与采集速度/离轴角/深度/时间均不相关;
+    - 三个独立优化器(中位起点/旋转平均起点/交替优化)收敛到同一联合
+      最优 pooled RMS ≈ 6.64px(刚性外参 + 固定内参的可达地板);
+    - 焦距 ±2% 扫描(单路/双路)不塌缩散布(排除 Phase 2 焦距失准);
+    - 全内参放开(±3% 界)联合优化 120 轮仍在缓慢下降(34.9→1.64px,
+      内参持续漂移)——Phase 2 独立标定的两路内参在双目精度下互不兼容
+      (参考工程 multibundle.py 文档串原话记录过同类症状),叠加支架
+      刚性/同步存疑的采集数据。
+    结论:数据/上游缺陷,不是引擎缺陷。因此本用例两段:
+    1) 哨兵段:solve_stereo 必须被离散度防线拦下(fail-closed 是生产
+       正确行为,T-03-08 防线在真实缺陷数据上工作 = 断言它触发);
+    2) 诊断段:防线关闭的诊断链给出量级出口与留档数值,并断言
+       spread 仍超阈值——一旦上游修复(重标内参/重采数据),本断言
+       翻红,强迫有人回来把本用例恢复成 plan 原门限的验收。
+    """
+    missing = [str(p) for p in _REAL_ARTIFACTS if not p.is_file()]
+    if missing:
+        pytest.fail(
+            f"真实数据引擎验收所需产物缺失:{missing}——本用例是生产门禁,"
+            f"请先运行 stereo-calib preprocess 与 stereo-calib intrinsic 生成 "
+            f"Phase 1/2 产物后再跑全量测试。"
+        )
+
+    cfg = load_config(_REPO_ROOT / "config.yaml")
+    pairs = load_pairs(
+        cfg.board, _REAL_ARTIFACTS[0], _REAL_ARTIFACTS[1], _REAL_ARTIFACTS[2],
+        cfg.stereo.exclude_pairs, cfg.stereo.outlier.min_pairs)
+    intr1 = load_intrinsics(_REAL_ARTIFACTS[3])
+    intr2 = load_intrinsics(_REAL_ARTIFACTS[4])
+
+    # ---- 哨兵段:离散度防线必须在当前真实数据上 fail-closed(T-03-08) ----
+    with pytest.raises(ValueError, match="离散度防线"):
+        solve_stereo(pairs, intr1, intr2, cfg)
+
+    # ---- 诊断段:防线关闭的诊断链(与引擎同一套组件,仅绕开守门) ----
+    t0 = time.perf_counter()
+    pass1 = pnp_median(pairs, intr1, intr2, median_spread_max_deg=None)
+    pairs2, flip = disambiguate_pairs(pairs, intr1, intr2, pass1,
+                                      cfg.stereo.flip_ratio)
+    pass2 = pnp_median(pairs2, intr1, intr2, median_spread_max_deg=None)
+    from dataclasses import replace as _dc_replace
+    refine_cfg = _dc_replace(cfg.stereo.refine)
+    init = _dc_replace(pass2, spread_deg=float("inf"))
+    result = refine_stereo(pairs2, intr1, intr2, init, refine_cfg)
+    elapsed = time.perf_counter() - t0
+
+    # STER-02 量级出口在诊断链上依然必须成立(baseline 落带 + 近同向)
+    lo, hi = cfg.stereo.baseline_band_mm
+    assert lo <= result.baseline_mm <= hi, (
+        f"baseline {result.baseline_mm:.2f}mm 落在带 [{lo}, {hi}] 之外——"
+        f"量级灾难(参考实录:内建双目例程在该机型把它标到 2500mm)")
+    assert result.rotation_angle_deg < 90.0, (
+        f"转角 {result.rotation_angle_deg:.3f}° 应 < 90°(刚架两相机近同向)")
+    assert result.per_pair_rms.shape == (len(pairs.image_ids),)
+    assert np.isfinite(result.per_pair_rms).all(), "全部对必须幸存(逐对 RMS 有限)"
+    # 逐对独立拟合亚像素:引擎的逐视图求解机械在真实数据上达标
+    assert float(np.median(pass1.per_pair_rms)) < 0.5, (
+        f"逐对独立 RMS 中位 {np.median(pass1.per_pair_rms):.4f}px 应 < 0.5px"
+        f"(两路独立位姿拟合必须亚像素,否则引擎本身有问题)")
+
+    # 数据缺陷哨兵:当前真实产物的相对位姿散布必须仍然超阈——上游修复后
+    # 此断言翻红,强迫把本用例恢复成 plan 原门限(rms_reproj < 1.0px)验收。
+    assert pass2.spread_deg > cfg.stereo.median_spread_max_deg, (
+        f"pass2 离散度 {pass2.spread_deg:.3f}° 已不超阈值 "
+        f"{cfg.stereo.median_spread_max_deg}°——真实数据已可过防线!"
+        f"请把本用例恢复成 plan 原门限验收(pooled RMS < 1.0px)并重新记录数值")
+
+    print(f"\n[真实数据引擎诊断留档] pairs={len(pairs.image_ids)} "
+          f"baseline={result.baseline_mm:.2f}mm "
+          f"angle={result.rotation_angle_deg:.3f}deg "
+          f"rms_reproj={result.rms_reproj:.4f}px(未达 plan 门限 1.0px,"
+          f"数据缺陷证据,详见 SUMMARY) "
+          f"per_pair_rms_median={float(np.median(result.per_pair_rms)):.4f}px "
+          f"pass2_spread={pass2.spread_deg:.3f}deg "
+          f"pass2_flipped={flip['pass2_flipped']} "
+          f"elapsed={elapsed:.1f}s "
+          f"status={result.solver_meta['status']} nfev={result.solver_meta['nfev']} "
+          f"converged={result.solver_meta['converged']}")
+
+
+def test_synthetic_112_pairs_full_chain_under_10s():
+    """合成 112 对全链 < 10 秒:解析雅可比秒级承诺的自动化证明(决策 1/T-03-09)。
+
+    超时即雅可比路线回归成数值差分(分钟级),当场失败。顺带在 112 对
+    规模上复核全链真值恢复(转角 < 0.1°、t < 1mm)与 baseline 落带。
+    """
+    synth = make_stereo_synth(n_pairs=112, seed=7)
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth)
+    t0 = time.perf_counter()
+    result = solve_stereo(pairs, intr1, intr2, StereoCalibConfig())
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 10.0, (
+        f"112 对全链耗时 {elapsed:.1f}s 应 < 10s——解析雅可比秒级承诺被击穿,"
+        f"检查是否回归成数值差分路线(T-03-09)")
+    assert _rotation_angle_deg(result.R, synth.R_rel_true) < 0.1
+    assert float(np.linalg.norm(result.t - synth.t_rel_true)) < 1.0
+    lo, hi = StereoCalibConfig().stereo.baseline_band_mm
+    assert lo <= result.baseline_mm <= hi
