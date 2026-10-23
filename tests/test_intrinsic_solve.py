@@ -241,3 +241,18 @@ def test_solve_source_guard_models_only_math():
     assert 'tr_solver="lsmr"' in source and 'x_scale="jac"' in source, (
         "scipy 精化必须走 trf + lsmr + x_scale=jac 的稀疏配置")
     assert 'loss="linear"' in source, "loss 固定 linear(离群由 02-03 剔除机制处理)"
+
+
+def test_solve_source_guard_no_dead_jac_sparsity():
+    """jac 为 callable 时 scipy 静默忽略 jac_sparsity(WR-02 回归,源码防线)。
+
+    传入即死计算 + 机制描述失实(稀疏性真实机制 = callable jac 返回
+    csr + tr_solver='lsmr');此防线防止未来把 jac_sparsity 加回
+    least_squares 调用,或让 jac 切成字符串方法后静默激活从未被验证过的
+    结构分组语义。
+    """
+    source = pathlib.Path("src/stereo_calib/intrinsic/solve.py").read_text(encoding="utf-8")
+    assert "jac_sparsity" not in source, (
+        "jac 为 callable 时 jac_sparsity 被 scipy 静默忽略(死计算),不得传入")
+    assert "make_sparsity" not in source, (
+        "稀疏结构矩阵构造已随 jac_sparsity 一并移除,不得回潮")

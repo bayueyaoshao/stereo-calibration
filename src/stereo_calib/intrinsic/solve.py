@@ -250,8 +250,8 @@ def _structure_positions(n_views: int, n_points: int) -> tuple[np.ndarray, np.nd
     """全部 (行, 列) 结构位置,按 [视图0 内参块, 视图0 外参块, 视图1 …] 顺序展平。
 
     结构事实:每残差行恰碰 9 个内参列 + 本视图 6 个外参列(nnz =
-    2·V·P·15),别视图的外参列结构为零。雅可比组装与结构矩阵共用本函数,
-    保证两者的行列排布永远一致(Pitfall 4 的结构性防线)。
+    2·V·P·15),别视图的外参列结构为零。雅可比组装的行列下标由本函数
+    唯一给出(残差行序同 row_index 契约,Pitfall 4 的结构性防线)。
     """
     n_params = len(models.INTRINSIC_NAMES)
     row_template = np.arange(2 * n_points)
@@ -306,19 +306,6 @@ def make_jacobian_fn(objp: np.ndarray, uvs: np.ndarray):
         return coo_matrix((np.concatenate(vals), (rows, cols)), shape=shape).tocsr()
 
     return jacobian_fn
-
-
-def make_sparsity(n_views: int, n_points: int) -> csr_matrix:
-    """0/1 稀疏结构矩阵(least_squares 的 jac_sparsity),csr。
-
-    结构 = "允许非零"的位置清单:每残差行恰 9 个内参列 + 本视图 6 个外参
-    列。个别位置的实际导数可能恰为 0(如 ∂u/∂fy 恒 0)——结构照给、值
-    为 0 不碍事;结构外的位置必须永远为 0,scipy 按结构分组解子问题。
-    """
-    n_params = len(models.INTRINSIC_NAMES)
-    rows, cols = _structure_positions(n_views, n_points)
-    return coo_matrix((np.ones(rows.shape[0], dtype=np.int8), (rows, cols)),
-                      shape=(2 * n_views * n_points, n_params + 6 * n_views)).tocsr()
 
 
 def _tail_improvement(cost_trace: list[float]) -> float:
@@ -397,7 +384,9 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
     sol = least_squares(
         traced_residual, theta0,
         jac=make_jacobian_fn(objp_arr, uvs_arr),
-        jac_sparsity=make_sparsity(n_views, uvs_arr.shape[1]),
+        # 不传稀疏结构矩阵参数:jac 为 callable 时 scipy 对它静默忽略(传入
+        # 即死计算);稀疏性利用只经"callable jac 返回 csr + tr_solver='lsmr'"
+        # 这一条真实机制(见 make_jacobian_fn),不靠结构矩阵。
         method=refine_cfg.method, tr_solver="lsmr", x_scale="jac",
         # 离群帧由 02-03 的剔除机制处理,不引入鲁棒核(loss 写死 linear,
         # RESEARCH OQ2 裁决;若未来需要鲁棒核走配置化扩展,不在这里塞分支)
