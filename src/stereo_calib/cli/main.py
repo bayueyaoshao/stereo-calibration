@@ -54,11 +54,6 @@ def _setup_runtime(
         pass
 
 
-def _not_implemented(name: str) -> None:
-    """未实现模块的占位输出。"""
-    typer.echo(f"命令「{name}」由后续阶段实现。")
-
-
 @app.command(help="模块1 数据预处理:扫描 data/ 双目图像对 → 棋盘格角点检测(SB 主路线,输出必过"
                   "规范化)→ 每相机每数据集落盘角点 npz + 可用/失败清单 CSV。")
 def preprocess() -> None:
@@ -95,10 +90,25 @@ def intrinsic() -> None:
         raise typer.Exit(code=1) from e
 
 
-@app.command(help="模块3 双目外参标定(后续阶段实现)")
+@app.command(help="模块3 双目外参标定:消费 Phase 1 公共视场对清单/角点 npz + Phase 2 intrinsics.json "
+                  "→ 每共视图两路 PnP → 相对位姿中位 → scipy 外参精化 → train 离群自动剔除留痕"
+                  "→ test 集对角距离残差验证 → extrinsics_stereo.json + 报告落盘。")
 def stereo() -> None:
-    """模块3 占位。"""
-    _not_implemented("stereo")
+    """模块3 命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈。"""
+    try:
+        # 局部导入:让 --help / 占位命令不依赖 stereo 模块,加快启动
+        from stereo_calib.stereo.pipeline import run_stereo
+
+        run_stereo(load_config(_config_path))
+    except (ValueError, OSError, ArithmeticError, RuntimeError,
+            AssertionError, cv2.error) as e:
+        # 数值路径异常家族(含双目链路 models.project 的 Z>0 数据防卫断言、
+        # baseline 量级硬门与 OpenCV 报错)与坏输入同样收口为中文一句,绝不
+        # 吐堆栈;正常的单段失败已在编排层降级留痕,这里兜最外层的底。
+        typer.echo(f"双目标定失败:{e}")
+        typer.echo("  请检查 config.yaml 配置与 Phase 1/2 产物(output/ 下的对清单/角点 npz "
+                   "与 intrinsics.json),修正后重跑 stereo-calib stereo。")
+        raise typer.Exit(code=1) from e
 
 
 def main() -> None:
