@@ -62,11 +62,17 @@ Plan: 1 of 3
 
 - None
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261023-wp3 | 修复 phase 1 code review 三个高价值发现(CR-01 分组键、WR-01 窗口阶梯、WR-02 失败标签) | 2026-10-23 | de3daae | [261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02](./quick/261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02/) |
+
 ## Session Continuity
 
-- **Last action:** Roadmap created (2026-10-23)
-- **Next action:** `/gsd-plan-phase 1`
-- **Notes:** data/ 已存在(train 188 组 / test 15 组);granularity=coarse,mode=yolo
+- **Last action:** Completed quick task 261023-wp3: CR-01/WR-01/WR-02 fixes (2026-10-23)
+- **Next action:** `/gsd-plan-phase 2`
+- **Notes:** data/ 已存在(train 188 组 / test 15 组);granularity=coarse,mode=yolo;Phase 1 complete + 修复后预处理重跑计数不变(141/155/15/15,classic 9,公共对 112/15)
 
 ---
 *Initialized 2026-10-23 during roadmap creation*
