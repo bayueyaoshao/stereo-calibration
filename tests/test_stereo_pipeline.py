@@ -606,6 +606,59 @@ def test_run_stereo_joint_enabled_fail_closed(tmp_path, monkeypatch):
         "不得被 rmtree 抹掉(否则像「跑过一轮」)")
 
 
+def test_run_stereo_train_eval_failure_degrades_not_explodes(tmp_path, monkeypatch):
+    """WR-01 回归:train 评估全帧失败必须降级留痕,绝不炸掉已成功且昂贵的
+    train 求解+精化结果——五件产物尽量齐(降级侧指标 NaN、npz 残差整块
+    NaN、CSV 幸存行缺席、报告追加降级留痕),test 侧指标不受影响,
+    true_distance_mm 从配置棋盘直接导出(不依赖 train 评估存活)。"""
+    import stereo_calib.stereo.pipeline as pipe_mod
+    from stereo_calib.io.config import load_config
+    from stereo_calib.stereo.pipeline import run_stereo
+
+    cfg_path, synth_train, synth_test = _stereo_e2e_env(tmp_path)
+
+    real_evaluate = pipe_mod.evaluate_split
+    calls = {"n": 0}
+
+    def _fake_evaluate(pairs, *args, **kwargs):
+        # 第 1 次调用 = test split(放行,保证 test 侧指标真实);
+        # 第 2 次调用 = train 幸存集(模拟全帧失败——如消歧锚全灭/DLT 退化)
+        calls["n"] += 1
+        if tuple(pairs.image_ids) == tuple(synth_test.group_ids):
+            return real_evaluate(pairs, *args, **kwargs)
+        raise RuntimeError("模拟 train 评估全帧失败(消歧锚全灭)")
+
+    monkeypatch.setattr(pipe_mod, "evaluate_split", _fake_evaluate)
+    monkeypatch.chdir(tmp_path)
+    run_stereo(load_config(cfg_path))  # 修复前:RuntimeError 直接穿出,零产物
+
+    out = tmp_path / "output" / "stereo"
+    # 五件产物尽量齐
+    for name in ("extrinsics_stereo.json", "per_frame_train.csv",
+                 "per_frame_test.csv", "train_residuals.npz", "report.md"):
+        assert (out / name).exists(), f"train 评估降级后 {name} 必须仍落盘"
+    payload = json.loads((out / "extrinsics_stereo.json").read_text(encoding="utf-8"))
+    assert np.isnan(payload["distance_rms_train_mm"]), (
+        "train 评估降级后距离 RMS 必须 NaN 留痕,不得静默填 0")
+    assert payload["distance_rms_test_mm"] < 2.0, "test 侧指标不受 train 降级影响"
+    assert payload["rms_reproj_train"] < 0.5, "train 求解+精化结果必须保留"
+    # true_distance_mm 从配置棋盘直接导出,不依赖 train 评估存活
+    assert payload["true_distance_mm"] == pytest.approx(305.16389039334257, abs=1e-6)
+    # CSV:train 幸存行缺席(只有表头),test 6 行齐全
+    train_lines = (out / "per_frame_train.csv").read_text(encoding="utf-8-sig").splitlines()
+    test_lines = (out / "per_frame_test.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert len(train_lines) == 1 and len(test_lines) == 7
+    # npz:残差整块 NaN 留痕,形状契约不破
+    with np.load(out / "train_residuals.npz", allow_pickle=False) as data:
+        assert data["group_ids"].tolist() == list(synth_train.group_ids)
+        assert data["residuals_cam1"].shape == (10, 88, 2)
+        assert np.isnan(data["residuals_cam1"]).all()
+        assert np.isnan(data["dist_err_mm"]).all()
+    # 报告:降级留痕中文可读
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "train 评估降级留痕" in report and "模拟 train 评估全帧失败" in report
+
+
 def test_run_stereo_outlier_rejection_and_test_marking(tmp_path, monkeypatch):
     """离群行为:train 1 对注入逐点散斑(恒定偏移会被该对位姿吸收——
     test_intrinsic_pipeline 同款教训,故用散斑)→ 恰被剔除一轮收敛留痕;

@@ -204,7 +204,8 @@ def write_report_md(path: Path | str, summary: dict, distance_rms_max_mm: float,
         train_evals / test_evals(逐对清单:group_id/reproj_rms/dist_err_mm/
         flipped/note/dropped)/ dropped_pairs(剔除留痕清单)/
         flip_log {"train"/"test": {"pass2_flipped", "pairs"}} /
-        outlier_loop(剔除循环结束原因,含保险丝触发说明)/ failed / error。
+        outlier_loop(剔除循环结束原因,含保险丝触发说明)/ failed / error /
+        test_error / train_error(单段评估降级留痕,可选)。
 
     判定列按 distance_rms_max_mm 给 PASS/FAIL——只作报告结论,不作退出
     条件(OVERNIGHT AUTONOMY:跑完留痕,人不被夜里叫起来看退出码)。
@@ -269,6 +270,9 @@ def write_report_md(path: Path | str, summary: dict, distance_rms_max_mm: float,
         lines.append("")
         if summary.get("test_error"):
             lines.append(f"**test 评估降级留痕**:{summary['test_error']}")
+            lines.append("")
+        if summary.get("train_error"):
+            lines.append(f"**train 评估降级留痕**:{summary['train_error']}")
             lines.append("")
 
         # ---- 逐帧距离残差表:train / test 各一节 ----

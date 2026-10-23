@@ -38,13 +38,14 @@ import numpy as np
 import typer
 
 from stereo_calib.io.config import StereoCalibConfig
+from stereo_calib.preprocess.artifacts import build_object_points
 from stereo_calib.stereo.artifacts import (
     write_extrinsics_stereo_json,
     write_per_frame_csv,
     write_report_md,
     write_residuals_npz,
 )
-from stereo_calib.stereo.evaluate import evaluate_split
+from stereo_calib.stereo.evaluate import evaluate_split, true_board_distance
 from stereo_calib.stereo.observation import (
     IntrinsicsView,
     Pairs,
@@ -230,6 +231,10 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
     # ---- 评估:test 全对(永不剔除只标记)+ train 幸存集 ----
     # 距离残差只进报告与标记,绝不回流剔除判据(决策 2/决策 9)。train 的
     # 剔除判据只有逐对重投影 RMS(上面循环已完),这里评估纯粹是留证。
+    # 两路评估同在单段降级收口内(WR-01):任一 split 评估全帧失败 → 中文
+    # 留痕降级,已成功且昂贵的 train 求解+精化结果绝不丢弃——产物五件
+    # 尽量齐(降级侧指标 NaN、npz 残差整块 NaN、CSV 幸存行缺席、报告追加
+    # 降级留痕)。
     test_error = ""
     try:
         test_eval = evaluate_split(test, intr1, intr2, final.R, final.t,
@@ -238,8 +243,14 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         test_eval = None
         test_error = f"{type(e).__name__}——{e}"
         typer.echo(f"  test 评估失败,降级留痕(train 产物不受影响):{test_error}")
-    train_eval = evaluate_split(train_survivors, intr1, intr2, final.R, final.t,
-                                cfg.board, stereo.flip_ratio)
+    train_error = ""
+    try:
+        train_eval = evaluate_split(train_survivors, intr1, intr2, final.R, final.t,
+                                    cfg.board, stereo.flip_ratio)
+    except _SEGMENT_EXC as e:
+        train_eval = None
+        train_error = f"{type(e).__name__}——{e}"
+        typer.echo(f"  train 评估失败,降级留痕(train 求解结果保留):{train_error}")
 
     # test 逐帧标记:重投影超中位乘数阈 → note 追加标记(考卷不可改,
     # 恒不剔除);判据与 train 剔除同源(逐对重投影 × 中位乘数),但只标不剔
@@ -269,7 +280,12 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
 
     rms_reproj_test = _pooled_frame_rms(test_rows) if test_rows else float("nan")
     distance_rms_test = test_eval.distance_rms_mm if test_eval is not None else float("nan")
-    distance_rms_train = train_eval.distance_rms_mm
+    distance_rms_train = (train_eval.distance_rms_mm if train_eval is not None
+                          else float("nan"))
+    # true_distance_mm 是配置棋盘的确定量(对角线长度),不依赖任何评估
+    # 存活——train 评估降级时直接从配置导出,契约键照常给真值(WR-01)
+    true_distance = (train_eval.true_distance_mm if train_eval is not None
+                     else true_board_distance(build_object_points(cfg.board)))
 
     stereo_root.mkdir(parents=True, exist_ok=True)
 
@@ -283,7 +299,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         rms_reproj_test=rms_reproj_test,
         distance_rms_train_mm=distance_rms_train,
         distance_rms_test_mm=distance_rms_test,
-        true_distance_mm=train_eval.true_distance_mm,
+        true_distance_mm=true_distance,
         dropped_pairs=dropped, flip_log=flip_log, solver_meta=dict(
             final.solver_meta, solver=final.solver),
         board=cfg.board, config_snapshot={"stereo": asdict(stereo)})
@@ -301,7 +317,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
                  "route_cam2": r2, "reproj_rms": f"{d['rms']:.4f}",
                  "dist_err_mm": "", "dropped": "True",
                  "note": f"第 {d['round']} 轮重投影超阈剔除(阈值 {d['threshold']:.4f}px)"})
-    for pos, ev in enumerate(train_eval.evals):
+    for pos, ev in enumerate(train_eval.evals if train_eval is not None else []):
         r1, r2 = train_survivors.routes[pos]
         train_csv_rows.append(
             {"group_id": ev.group_id, "split": "train", "route_cam1": r1,
@@ -321,11 +337,19 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
     csv_test_path = write_per_frame_csv(
         stereo_root / "per_frame_test.csv", test_csv_rows)
 
+    # 诊断 npz:评估降级时残差整块 NaN 留痕(形状契约不破,失败可审计)
+    if train_eval is not None:
+        npz_res1, npz_res2 = train_eval.residuals_cam1, train_eval.residuals_cam2
+        npz_dist = np.asarray([ev.dist_err_mm for ev in train_eval.evals],
+                              dtype=np.float64)
+    else:
+        n_surv, n_points = len(train_survivors.image_ids), cfg.board.rows * cfg.board.cols
+        npz_res1 = np.full((n_surv, n_points, 2), np.nan)
+        npz_res2 = np.full((n_surv, n_points, 2), np.nan)
+        npz_dist = np.full(n_surv, np.nan)
     npz_path = write_residuals_npz(
         stereo_root / "train_residuals.npz", train_survivors.image_ids,
-        train_eval.residuals_cam1, train_eval.residuals_cam2,
-        final.per_pair_rms,
-        np.asarray([ev.dist_err_mm for ev in train_eval.evals], dtype=np.float64))
+        npz_res1, npz_res2, final.per_pair_rms, npz_dist)
 
     summary = {
         "ref_cam": 1, "R": final.R, "t": final.t, "rvec": final.rvec,
@@ -335,7 +359,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         "rms_reproj_test": rms_reproj_test,
         "distance_rms_train_mm": distance_rms_train,
         "distance_rms_test_mm": distance_rms_test,
-        "true_distance_mm": train_eval.true_distance_mm,
+        "true_distance_mm": true_distance,
         "n_pairs_train": len(survivors),
         "n_pairs_train_initial": len(train.image_ids),
         "n_pairs_test": len(test.image_ids),
@@ -344,7 +368,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
              "dist_err_mm": ev.dist_err_mm,
              "flipped": f"({ev.flipped[0]}, {ev.flipped[1]})",
              "dropped": False, "note": ev.note}
-            for ev in train_eval.evals],
+            for ev in (train_eval.evals if train_eval is not None else [])],
         "test_evals": [
             {"group_id": ev.group_id, "reproj_rms": ev.reproj_rms,
              "dist_err_mm": ev.dist_err_mm,
@@ -357,6 +381,8 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
     }
     if test_error:
         summary["test_error"] = f"test 评估失败(降级留痕,train 产物不受影响):{test_error}"
+    if train_error:
+        summary["train_error"] = f"train 评估失败(降级留痕,train 求解结果保留):{train_error}"
     report_path = write_report_md(
         stereo_root / "report.md", summary, stereo.distance_rms_max_mm,
         stereo.baseline_band_mm, {"stereo": asdict(stereo)})
@@ -372,6 +398,8 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
                f"(阈值 {stereo.distance_rms_max_mm} mm)")
     if test_error:
         typer.echo(f"  test 评估:{test_error}")
+    if train_error:
+        typer.echo(f"  train 评估:{train_error}")
     ok = np.isfinite(distance_rms_test) and distance_rms_test <= stereo.distance_rms_max_mm
     typer.echo(f"  判定:{'PASS' if ok else 'FAIL'}(按 distance_rms_max_mm,"
                f"报告结论非退出条件)")
