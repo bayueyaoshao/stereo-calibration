@@ -13,6 +13,7 @@ import csv
 import json
 import pathlib
 
+import cv2
 import numpy as np
 import pytest
 
@@ -233,3 +234,171 @@ def test_observation_source_guards():
     assert "load_corners" in source and "build_object_points" in source, (
         "必须复用 Phase 1 读取入口与物点重建")
     assert "INTRINSIC_NAMES" in source, "params 必须按名导航(禁魔数下标,Pitfall 13)"
+
+
+# ---------- Pattern 7 契约落盘:writer roundtrip(体例照 test_intrinsic_pipeline) ----------
+
+
+def _write_all_artifacts(tmp_path: pathlib.Path) -> dict:
+    """写齐五件产物(真实 writer 路径),返回各文件路径 + 写入样本。"""
+    from stereo_calib.stereo.artifacts import (
+        _EXTRINSICS_STEREO_JSON_KEYS,
+        write_extrinsics_stereo_json,
+        write_per_frame_csv,
+        write_report_md,
+        write_residuals_npz,
+    )
+
+    rng = np.random.default_rng(7)
+    t = np.array([120.0, 15.0, 8.0])
+    rvec = np.array([0.01, -0.02, 0.0349])
+    R = cv2.Rodrigues(rvec)[0]  # 真实正交阵(手写近似阵不满足刚架)
+    angle = float(np.linalg.norm(rvec))
+    K1 = np.array([[1850.0, 0.0, 1280.0], [0.0, 1840.0, 720.0], [0.0, 0.0, 1.0]])
+    K2 = np.array([[1850.0, 0.0, 1280.0], [0.0, 1836.0, 724.0], [0.0, 0.0, 1.0]])
+    D1 = np.array([-0.40, 0.23, 1.1e-4, -3.8e-5, -0.08])
+    D2 = D1.copy()
+    board = BoardSpec()
+    out = tmp_path / "output" / "stereo"
+
+    json_path = write_extrinsics_stereo_json(
+        out / "extrinsics_stereo.json", ref_cam=1, R=R, t=t, rvec=rvec,
+        rotation_angle_deg=angle, baseline_mm=float(np.linalg.norm(t)),
+        K1=K1, D1=D1, K2=K2, D2=D2, n_pairs_train=9, n_pairs_test=4,
+        rms_reproj_train=0.31, rms_reproj_test=0.27,
+        distance_rms_train_mm=0.42, distance_rms_test_mm=0.66,
+        true_distance_mm=305.16389039334257,
+        dropped_pairs=[{"group_id": "g_bad", "rms": 3.2, "round": 1, "threshold": 1.5}],
+        flip_log={"train": {"pass2_flipped": 1, "pairs": ["g_flip"]},
+                  "test": {"pass2_flipped": 0, "pairs": []}},
+        solver_meta={"status": 0, "nfev": 42}, board=board,
+        config_snapshot={"flip_ratio": 0.5})
+
+    rows = [
+        {"group_id": "g_flip", "split": "train", "route_cam1": "sb", "route_cam2": "sb",
+         "reproj_rms": f"{0.29:.4f}", "dist_err_mm": f"{0.51:.4f}",
+         "dropped": "False", "note": "pass2 翻转"},
+        {"group_id": "g_bad", "split": "train", "route_cam1": "sb", "route_cam2": "sb",
+         "reproj_rms": f"{3.2:.4f}", "dist_err_mm": f"{9.9:.4f}",
+         "dropped": "True", "note": "超阈值剔除"},
+        {"group_id": "g_t1", "split": "test", "route_cam1": "sb", "route_cam2": "sb",
+         "reproj_rms": f"{0.27:.4f}", "dist_err_mm": f"{0.66:.4f}",
+         "dropped": "False", "note": ""},
+    ]
+    csv_path = write_per_frame_csv(out / "per_frame_train.csv", rows)
+
+    group_ids = ["g_a", "g_b"]
+    res1 = rng.normal(0.0, 0.1, (2, 88, 2))
+    res2 = rng.normal(0.0, 0.1, (2, 88, 2))
+    npz_path = write_residuals_npz(
+        out / "train_residuals.npz", group_ids, res1, res2,
+        np.array([0.29, 0.31]), np.array([0.51, 0.42]))
+
+    summary = {
+        "ref_cam": 1, "R": R, "t": t, "rvec": rvec,
+        "rotation_angle_deg": angle, "baseline_mm": float(np.linalg.norm(t)),
+        "rms_reproj_train": 0.31, "rms_reproj_test": 0.27,
+        "distance_rms_train_mm": 0.42, "distance_rms_test_mm": 0.66,
+        "true_distance_mm": 305.16389039334257,
+        "n_pairs_train": 9, "n_pairs_train_initial": 10, "n_pairs_test": 4,
+        "train_evals": [
+            {"group_id": "g_flip", "reproj_rms": 0.29, "dist_err_mm": 0.51,
+             "flipped": "(True, False)", "dropped": False, "note": "pass2 翻转"},
+            {"group_id": "g_bad", "reproj_rms": 3.2, "dist_err_mm": 9.9,
+             "flipped": "(False, False)", "dropped": True, "note": "超阈值剔除"},
+        ],
+        "test_evals": [
+            {"group_id": "g_t1", "reproj_rms": 0.27, "dist_err_mm": 0.66,
+             "flipped": "(False, False)", "dropped": False, "note": ""},
+        ],
+        "dropped_pairs": [{"group_id": "g_bad", "rms": 3.2, "round": 1, "threshold": 1.5}],
+        "flip_log": {"train": {"pass2_flipped": 1, "pairs": ["g_flip"]},
+                     "test": {"pass2_flipped": 0, "pairs": []}},
+        "outlier_loop": "第 1 轮后无新离群对,定稿",
+    }
+    md_path = write_report_md(out / "report.md", summary,
+                              distance_rms_max_mm=5.0,
+                              baseline_band_mm=(20.0, 2000.0),
+                              config_snapshot={"flip_ratio": 0.5})
+    return {"json": json_path, "csv": csv_path, "npz": npz_path, "md": md_path,
+            "keys": _EXTRINSICS_STEREO_JSON_KEYS, "rows": rows}
+
+
+def test_extrinsics_stereo_json_roundtrip_full_contract(tmp_path):
+    """JSON 写入→读回:键全集 == 契约常量、R 3×3 嵌套、baseline_mm == ‖t‖、
+    剔除/翻转留痕逐字段保真(Phase 2 契约体例,Pattern 7 + 决策 8)。"""
+    art = _write_all_artifacts(tmp_path)
+    payload = json.loads(art["json"].read_text(encoding="utf-8"))
+    assert set(payload) == set(art["keys"]), "JSON 字段集漂移(契约 = Pattern 7 全集 + train 距离 RMS)"
+    R = np.asarray(payload["R"], dtype=np.float64)
+    t = np.asarray(payload["t"], dtype=np.float64)
+    assert R.shape == (3, 3) and t.shape == (3,)
+    assert abs(np.linalg.norm(R @ R.T) - np.sqrt(3.0)) < 1e-12, "R 必须是正交阵(刚架)"
+    assert payload["baseline_mm"] == pytest.approx(float(np.linalg.norm(t))), (
+        "契约:baseline_mm = ‖t‖(两处来源漂移当场抓住)")
+    assert payload["ref_cam"] == 1
+    assert payload["n_pairs_train"] == 9 and payload["n_pairs_test"] == 4
+    assert payload["true_distance_mm"] == pytest.approx(305.16389039334257, abs=1e-9)
+    assert payload["dropped_pairs"] == [
+        {"group_id": "g_bad", "rms": 3.2, "round": 1, "threshold": 1.5}]
+    assert payload["flip_log"]["train"] == {"pass2_flipped": 1, "pairs": ["g_flip"]}
+    assert payload["flip_log"]["test"] == {"pass2_flipped": 0, "pairs": []}
+    assert np.asarray(payload["D1"]).shape == (5,), "D 快照必须保持 OpenCV 5 长布局"
+
+
+def test_extrinsics_json_baseline_tamper_raises(tmp_path):
+    """baseline_mm 与 ‖t‖ 两张皮 → 写前断言中文报错(契约一致性防线)。"""
+    from stereo_calib.stereo.artifacts import write_extrinsics_stereo_json
+
+    R = np.eye(3)
+    t = np.array([120.0, 15.0, 8.0])
+    with pytest.raises(AssertionError, match="不一致"):
+        write_extrinsics_stereo_json(
+            tmp_path / "x.json", ref_cam=1, R=R, t=t, rvec=np.zeros(3),
+            rotation_angle_deg=0.0, baseline_mm=999.0,
+            K1=np.eye(3), D1=np.zeros(5), K2=np.eye(3), D2=np.zeros(5),
+            n_pairs_train=1, n_pairs_test=1, rms_reproj_train=0.0,
+            rms_reproj_test=0.0, distance_rms_train_mm=0.0,
+            distance_rms_test_mm=0.0, true_distance_mm=1.0,
+            dropped_pairs=[], flip_log={}, solver_meta={}, board=BoardSpec(),
+            config_snapshot={})
+
+
+def test_residuals_npz_roundtrip_no_pickle(tmp_path):
+    """npz 写入→allow_pickle=False 读回:unicode 对账列 + float64 形状契约。"""
+    art = _write_all_artifacts(tmp_path)
+    with np.load(art["npz"], allow_pickle=False) as data:
+        assert data["group_ids"].dtype.kind == "U", "对账列必须定长 unicode"
+        assert data["group_ids"].tolist() == ["g_a", "g_b"]
+        assert data["residuals_cam1"].dtype == np.float64
+        assert data["residuals_cam1"].shape == (2, 88, 2)
+        assert data["residuals_cam2"].shape == (2, 88, 2)
+        assert data["per_pair_rms"].shape == (2,)
+        assert data["dist_err_mm"].shape == (2,)
+
+
+def test_per_frame_csv_header_and_order(tmp_path):
+    """CSV utf-8-sig 表头 + 列序契约:8 列依 _PER_FRAME_FIELDS,行序保真。"""
+    from stereo_calib.stereo.artifacts import _PER_FRAME_FIELDS
+
+    art = _write_all_artifacts(tmp_path)
+    raw = art["csv"].read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), "必须 utf-8-sig(Excel 双击直开)"
+    text = art["csv"].read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    assert lines[0].split(",") == _PER_FRAME_FIELDS, "列序漂移"
+    assert len(lines) == 4, "表头 + 3 数据行"
+    assert lines[1].startswith("g_flip,train,sb,sb,"), "行序与内容保真"
+
+
+def test_report_md_sections_and_verdict(tmp_path):
+    """report.md:距离残差表 / PASS 判定 / 基线量级核对 / 剔除与翻转留痕 /
+    配置快照附录逐节在位(人工核对出口:量级核对行 + 报告结论非退出条件)。"""
+    art = _write_all_artifacts(tmp_path)
+    text = art["md"].read_text(encoding="utf-8")
+    for token in ("距离残差", "PASS", "基线", "量级核对", "剔除留痕",
+                  "翻转留痕", "配置快照", "只作报告结论,不作退出条件",
+                  "305.1639"):
+        assert token in text, f"report.md 缺少「{token}」节/字样"
+    assert "g_bad" in text and "超阈值剔除" in text, "逐帧表须含剔除对留痕"
+
