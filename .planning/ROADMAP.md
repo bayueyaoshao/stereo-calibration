@@ -96,7 +96,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 03-03-PLAN.md — 评估链(消歧 → per-frame 2 视图 BA → undist/DLT → 板系对角距离残差)+ Pattern 7 产物契约 + 离群剔除编排 + 源码防线(STER-01/03/04)
+- [x] 03-03-PLAN.md — 评估链(消歧 → per-frame 2 视图 BA → undist/DLT → 板系对角距离残差)+ Pattern 7 产物契约 + 离群剔除编排 + 源码防线(STER-01/03/04)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -108,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 2/4 | In Progress|  |
+| 3. 模块3 双目标定 | 3/4 | In Progress|  |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*
