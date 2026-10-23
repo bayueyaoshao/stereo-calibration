@@ -7,14 +7,28 @@ Phase 2 消费的是角点数组,不需要渲染图像——用真值参数 + �
 秒级完成(图像文件仅 image_size 派生需要,用最小噪声图即可)。
 """
 
+import csv
+import json
 import pathlib
 
 import cv2
 import numpy as np
 import pytest
 
+from stereo_calib.intrinsic.artifacts import (
+    write_extrinsics_npz,
+    write_intrinsics_json,
+    write_per_frame_csv,
+    write_report_md,
+    write_residuals_npz,
+)
 from stereo_calib.intrinsic.metrics import compute_metrics
-from stereo_calib.intrinsic.models import project, transform_to_camera
+from stereo_calib.intrinsic.models import (
+    INTRINSIC_NAMES,
+    intrinsics_matrix,
+    project,
+    transform_to_camera,
+)
 from stereo_calib.intrinsic.observation import load_views
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points
@@ -207,3 +221,118 @@ def test_metrics_and_observation_source_guards():
     obs_src = pathlib.Path("src/stereo_calib/intrinsic/observation.py").read_text(encoding="utf-8")
     assert "np.load(" not in obs_src, "装载必须经 load_corners(allow_pickle=False 防线)"
     assert "from stereo_calib.preprocess.artifacts import" in obs_src, "必须复用 Phase 1 读取入口"
+
+
+# ===========================================================================
+# 02-03 任务 1:落盘层 writer 单元契约(tmp_path roundtrip)
+# ===========================================================================
+
+# intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
+_JSON_KEYS = {
+    "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
+    "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
+    "dropped_frames", "solver_meta", "board", "config_snapshot",
+}
+
+
+def test_write_intrinsics_json_roundtrip(tmp_path):
+    """写 → 读回逐字段断言:字段全集、params 按名、K/D 形状与数值冗余一致。"""
+    dropped = [{"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
+    out = write_intrinsics_json(
+        tmp_path / "cam1" / "intrinsics.json", cam=1, image_size=(2560, 1440),
+        params=_TRUE_PARAMS, K=intrinsics_matrix(_TRUE_PARAMS), D=_TRUE_PARAMS[4:9],
+        solver="scipy", refine_enabled=True, rms_train_overall=0.3316,
+        rms_test_overall=0.2389, n_views_train=141, n_views_test=15,
+        dropped_frames=dropped, solver_meta={"status": 0, "opencv_rms": 2.5782},
+        board=BoardSpec(), config_snapshot={"intrinsic": {"rms_test_max": 1.0}})
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert set(payload) == _JSON_KEYS, "intrinsics.json 字段集必须与 Pattern 7 契约全等"
+    assert list(payload["params"]) == list(INTRINSIC_NAMES), "params 必须按名(模块 3 的固定接口)"
+    for name, v in zip(INTRINSIC_NAMES, _TRUE_PARAMS):
+        assert payload["params"][name] == pytest.approx(float(v))
+    K = np.asarray(payload["K"])
+    assert K.shape == (3, 3)
+    assert K[0, 0] == pytest.approx(1850.0) and K[0, 2] == pytest.approx(1280.0)
+    assert K[1, 1] == pytest.approx(1840.0) and K[1, 2] == pytest.approx(720.0)
+    assert payload["D"] == pytest.approx([-0.40, 0.23, 1.1e-4, -3.8e-5, -0.08])
+    assert payload["image_size"] == [2560, 1440], "image_size 必须是 [宽, 高]"
+    assert payload["cam"] == 1
+    assert payload["solver"] == "scipy" and payload["refine_enabled"] is True
+    assert payload["n_views_train"] == 141 and payload["n_views_test"] == 15
+    assert payload["dropped_frames"] == [
+        {"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
+    assert payload["solver_meta"]["opencv_rms"] == pytest.approx(2.5782)
+    assert payload["board"]["cols"] == 11 and payload["board"]["square_size_mm"] == 25.0
+
+
+def test_write_residuals_npz_roundtrip(tmp_path):
+    """残差 npz:allow_pickle=False 可读,dtype/形状/对账列一致,NaN 原样通过。"""
+    residuals = np.arange(2 * 4 * 2, dtype=np.float64).reshape(2, 4, 2)
+    residuals[1, 0, 0] = np.nan  # test 份失败帧留痕语义:NaN 必须原样落盘读回
+    per_view = np.array([0.5, np.nan])
+    out = write_residuals_npz(tmp_path / "train_residuals.npz",
+                              ["003_cam1", "004_cam1"], residuals, per_view)
+    data = np.load(out, allow_pickle=False)
+    assert data["residuals"].shape == (2, 4, 2) and data["residuals"].dtype == np.float64
+    assert data["per_view_rms"].shape == (2,) and data["per_view_rms"].dtype == np.float64
+    assert [str(s) for s in data["image_ids"]] == ["003_cam1", "004_cam1"]
+    assert data["residuals"][0].tolist() == residuals[0].tolist()
+    assert np.isnan(data["residuals"][1, 0, 0]) and np.isnan(data["per_view_rms"][1])
+
+
+def test_write_extrinsics_npz_roundtrip(tmp_path):
+    """外参 npz(诊断用):allow_pickle=False 可读,(V,3) float64 + 对账列。"""
+    rvecs = np.linspace(-0.3, 0.3, 6, dtype=np.float64).reshape(2, 3)
+    tvecs = np.stack([np.arange(3, dtype=np.float64),
+                      np.arange(3, dtype=np.float64) + 10.0])
+    out = write_extrinsics_npz(tmp_path / "extrinsics.npz",
+                               ["003_cam1", "004_cam1"], rvecs, tvecs)
+    data = np.load(out, allow_pickle=False)
+    assert data["rvecs"].shape == (2, 3) and data["rvecs"].dtype == np.float64
+    assert data["tvecs"].shape == (2, 3) and data["tvecs"].dtype == np.float64
+    assert [str(s) for s in data["image_ids"]] == ["003_cam1", "004_cam1"]
+    assert data["rvecs"].tolist() == rvecs.tolist()
+
+
+def test_write_per_frame_csv_header_and_bom(tmp_path):
+    """逐帧 CSV:表头列序恰为六列契约 + utf-8-sig BOM(Excel 双击直开)。"""
+    rows = [{"image_id": "003_cam1", "split": "train", "source": "sb",
+             "rms": "0.1234", "dropped": "True",
+             "note": "第1轮剔除:RMS 15.200 超阈值 0.350"}]
+    out = write_per_frame_csv(tmp_path / "per_frame_cam1.csv", rows)
+    assert out.read_bytes().startswith(b"\xef\xbb\xbf"), "必须 utf-8-sig(带 BOM)"
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == ["image_id", "split", "source", "rms", "dropped", "note"]
+        got = list(reader)
+    assert got[0]["image_id"] == "003_cam1"
+    assert got[0]["dropped"] == "True"
+    assert "剔除" in got[0]["note"], "剔除行的中文说明必须原样落盘"
+
+
+def test_write_report_md_sections(tmp_path):
+    """报告:含指标对比(PASS/FAIL 判定)、按名参数表、离群留痕段与「无」占位。"""
+    params = {n: float(v) for n, v in zip(INTRINSIC_NAMES, _TRUE_PARAMS)}
+
+    def _summary(cam, rms_test, dropped, loop):
+        return {"cam": cam, "image_size": (2560, 1440), "params": params,
+                "solver": "scipy", "refine_enabled": True,
+                "rms_train_overall": 0.33, "rms_test_overall": rms_test,
+                "n_views_train": 10, "n_views_train_initial": 12, "n_views_test": 4,
+                "dropped_frames": dropped, "outlier_loop": loop,
+                "train_per_view_rms": [0.07] * 10,
+                "test_per_view_rms": [0.08, 0.06, float("nan"), 0.09]}
+
+    summaries = [
+        _summary(1, 0.24, [], "第 1 轮无超阈帧,剔除循环收敛(共剔除 0 帧)"),
+        _summary(2, 1.5, [], "第 1 轮无超阈帧,剔除循环收敛(共剔除 0 帧)"),
+    ]
+    out = write_report_md(tmp_path / "report.md", summaries, 1.0, {"intrinsic": {}})
+    text = out.read_text(encoding="utf-8")
+    assert "离群" in text, "报告必须有离群留痕段(INTR-04)"
+    assert "PASS" in text and "FAIL" in text, "按 rms_test_max 给两路判定"
+    assert "cam1" in text and "cam2" in text
+    assert "fx" in text and "p2" in text, "参数表必须按名列全 9 项"
+    assert "无(本轮运行没有帧超过离群阈值)" in text, "无剔除时离群表写「无」"
+    assert "中位" in text and "per_frame_cam1.csv" in text, "逐帧摘要指向 CSV 明细"
+    assert "config_snapshot" in text, "配置快照留痕进附录"
