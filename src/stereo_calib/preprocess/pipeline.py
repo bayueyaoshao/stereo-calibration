@@ -1,13 +1,14 @@
 """模块1 数据预处理编排:扫描 → 并行角点检测(SB 主路线 + classic 兜底)→ 汇总落盘。
 
 流程(编排体例移植自参考工程 calib.cli.main 的 _run_corners,只读引用):
-读配置 → 扫描数据树 → 预分配每 (split, cam) 的带掩码稠密数组 → 构造任务
-元组 → run_parallel 并行跑 detect_one worker(每图一任务;worker 内
-SB → classic 两级检测,任何异常包 TaskFailed 信封)→ 主进程逐个消费
-填槽 → 每相机每数据集一份 npz + meta.json + usable CSV,每数据集一份
-fail CSV → 全部检出帧画角点标注图(D-07 全量无抽样)+ 失败帧原图
-fail_ 前缀副本(开关控制,D-02)→ 打印中文汇总。max_workers = 1 时
-同函数串行回退(调试用,结果与并行一致)。
+读配置 → 扫描数据树 → 运行前清理产物子目录(D-11 防残留)→ 预分配每
+(split, cam) 的带掩码稠密数组 → 构造任务元组 → run_parallel 并行跑
+detect_one worker(每图一任务;worker 内 SB → classic 两级检测,任何
+异常包 TaskFailed 信封)→ 主进程逐个消费填槽 → 按 group_id 配对两路
+均检出的公共视场对 → 每相机每数据集一份 npz + meta.json + usable CSV,
+每数据集一份 fail CSV + common_fov_pairs CSV → 全部检出帧画角点标注图
+(D-07 全量无抽样)+ 失败帧原图 fail_ 前缀副本(开关控制,D-02)→
+打印中文汇总。max_workers = 1 时同函数串行回退(调试用,结果与并行一致)。
 
 按 D-01:检出即可用,不加任何额外质量闸门;检测路线记入 npz source 列
 与 usable CSV 的 route 列("sb" / "classic")。
@@ -20,6 +21,7 @@ fail_ 前缀副本(开关控制,D-02)→ 打印中文汇总。max_workers = 1 �
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -33,6 +35,7 @@ from stereo_calib.io.dataset import imread_checked, scan_dataset
 from stereo_calib.preprocess.artifacts import (
     build_object_points,
     save_corners_npz,
+    write_common_pairs_csv,
     write_fail_csv,
     write_usable_csv,
 )
@@ -109,6 +112,17 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
         typer.echo(f"警告:{w}")
 
     out_root = Path(cfg.output_root)
+
+    # ---- 运行前清理(D-11 固定覆盖 + Pitfall 7 防残留)----
+    # 只删 output_root/{train} 与 output_root/{test} 两个产物子目录,删后随
+    # 落盘按需重建;上次运行的 visualization/、fail_originals/、npz、CSV、meta
+    # 残留(如本次检出变少)不会误导人工复核。output_root 本身与其他未知
+    # 内容不动。数据安全前提(不重复实现):load_config 已在加载层拒绝
+    # output_root 与 data 目录相等/互相包含的配置(01-01 锁定),这里的
+    # rmtree 只可能命中 output_root 之下的产物目录,不可能触及 data/。
+    for split in _SPLITS:
+        shutil.rmtree(out_root / split, ignore_errors=True)
+
     groups = {
         (split, cam): _new_slot(
             [r for r in scan.records if r.split == split and r.cam == cam], n_corners)
@@ -178,6 +192,31 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
             f"这是异常信封防线被击穿的信号,请把本错误连同运行日志反馈维护者。"
         )
 
+    # ---- 公共视场配对(PREP-04;编排层按组 ID 配对,只在主进程做,不进 worker)----
+    # 同 group_id(叶子目录名)下 cam1 与 cam2 都检出才产一行;单边存在或
+    # 单边检出 → 不入公共清单,也不额外记 fail:fail 清单只记检测失败,
+    # 该帧的检出侧已在 usable 清单、失败对侧已在 fail 清单(D-01),把
+    # "单边检出"误标为失败只会带来无谓的原图拷贝与复核噪音。
+    common_rows_by_split: dict[str, list[dict]] = {split: [] for split in _SPLITS}
+    for split in _SPLITS:
+        detected_by_group: dict[str, dict[int, tuple]] = {}
+        for cam in _CAMS:
+            slot = groups[(split, cam)]
+            for j, rec in enumerate(slot["records"]):
+                if slot["detected"][j]:
+                    detected_by_group.setdefault(rec.group_id, {})[cam] = (
+                        rec, str(slot["source"][j]))
+        for group_id in sorted(detected_by_group):
+            cams_in_group = detected_by_group[group_id]
+            if 1 in cams_in_group and 2 in cams_in_group:
+                common_rows_by_split[split].append({
+                    "group_id": group_id,
+                    "cam1_path": str(cams_in_group[1][0].path),
+                    "cam2_path": str(cams_in_group[2][0].path),
+                    "route_cam1": cams_in_group[1][1],
+                    "route_cam2": cams_in_group[2][1],
+                })
+
     # ---- 落盘(D-05:output_root/{train,test}/ 分目录,D-11 直接覆盖)----
     objp = build_object_points(board)
     artifacts: list[Path] = []
@@ -195,6 +234,7 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
                 meta={
                     "split": split,
                     "cam": cam,
+                    "common_pairs": len(common_rows_by_split[split]),
                     "board": {"cols": cols, "rows": rows,
                               "square_size_mm": board.square_size_mm,
                               "unit": board.unit},
@@ -208,7 +248,9 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
             artifacts.extend([npz_path, split_dir / f"cam{cam}_{split}.meta.json",
                               usable_path])
         fail_path = write_fail_csv(split_dir / f"fail_{split}.csv", fail_by_split[split])
-        artifacts.append(fail_path)
+        common_path = write_common_pairs_csv(
+            split_dir / f"common_fov_pairs_{split}.csv", common_rows_by_split[split])
+        artifacts.extend([fail_path, common_path])
 
     # ---- 全量角点标注图 + 失败帧原图副本(PREP-06/D-07/D-08/D-02)----
     # 全部检出帧一张不落(D-07 绝不抽样——复核要挑"检出但角点偏移"的帧,
@@ -261,6 +303,11 @@ def run_preprocess(cfg: StereoCalibConfig) -> None:
     typer.echo(f"  失败帧合计:{total_fail} 张(逐张原因见 fail_*.csv,人工复核入口 D-02)")
     typer.echo(f"  检测路线分布:sb {n_sb} 帧、classic {n_classic} 帧"
                f"(classic = SB 未检出、由经典检测器兜住的帧)")
+    typer.echo("  公共视场对(同组两路均检出,common_fov_pairs_*.csv,Phase 3 双目标定输入清单):")
+    for split in _SPLITS:
+        if not any(groups[(split, cam)]["records"] for cam in _CAMS):
+            continue
+        typer.echo(f"    {split}:{len(common_rows_by_split[split])} 对")
     typer.echo(f"  角点标注图:{n_marked} 张(output_root/{{train,test}}/visualization/,"
                f"全部检出帧无抽样,图上烧录路径与路线 D-07/D-08)")
     if cfg.preprocess.copy_fail_originals:

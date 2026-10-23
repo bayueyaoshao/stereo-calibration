@@ -241,3 +241,92 @@ def test_copy_fail_originals_switch_off(tmp_path, monkeypatch, make_tiny_jpg, ca
     assert not (out / "train" / "fail_originals").exists(), \
         "copy_fail_originals 关闭时绝不能产出 fail_originals 目录"
     assert "已关闭" in capsys.readouterr().out, "开关关闭时汇总必须打印「已关闭」提示"
+
+
+# ---- 01-03 任务 2:公共视场配对 + 运行前清理 + 只读锁定(PREP-04/D-05/D-11)----
+
+def test_common_fov_pairs_pairing_rules(tmp_path, monkeypatch, make_chessboard_image):
+    """配对规则:一组两路均检出 → 1 对;一组仅 cam1 检出 → 不成对且绝不把
+    cam1 误标为失败(cam1 仍在 usable、cam2 在 fail);列序恰为契约五列。"""
+    # 组 ok:两路棋盘 → 期望 1 对
+    ts, leaf_ok = _GROUPS["g1"]
+    for cam in (1, 2):
+        img, _, _ = make_chessboard_image(degrade="blur", **_VIEWS[("g1", cam)])
+        target = tmp_path / "data" / "train" / ts / leaf_ok / f"cam{cam}.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(str(target), img)
+    # 组 half:cam1 棋盘 + cam2 纯噪声 → cam1 检出、cam2 失败,期望 0 对
+    ts_h, leaf_half = _GROUPS["g2"]
+    img1, _, _ = make_chessboard_image(degrade="blur", **_VIEWS[("g2", 1)])
+    half_dir = tmp_path / "data" / "train" / ts_h / leaf_half
+    half_dir.mkdir(parents=True, exist_ok=True)
+    assert cv2.imwrite(str(half_dir / "cam1.jpg"), img1)
+    rng = np.random.default_rng(7)
+    noise = rng.integers(0, 256, size=(480, 640), dtype=np.uint8)
+    assert cv2.imwrite(str(half_dir / "cam2.jpg"), noise)
+
+    (tmp_path / "config.yaml").write_text(_CONFIG_YAML, encoding="utf-8")
+    before = _tree_snapshot(tmp_path / "data")
+    monkeypatch.chdir(tmp_path)
+    preprocess()
+    out = tmp_path / "output"
+
+    rows = _read_csv(out / "train" / "common_fov_pairs_train.csv")
+    assert len(rows) == 1, "只有两路均检出的组才成对"
+    assert rows[0]["group_id"] == leaf_ok
+    assert list(rows[0].keys()) == ["group_id", "cam1_path", "cam2_path",
+                                    "route_cam1", "route_cam2"]
+    assert rows[0]["cam1_path"].endswith("cam1.jpg")
+    assert rows[0]["cam2_path"].endswith("cam2.jpg")
+    assert rows[0]["route_cam1"] in ("sb", "classic")
+
+    # 单边检出:cam1 仍在 usable、cam2 在 fail;cam1 绝不因配不上对被记失败
+    usable1 = _read_csv(out / "train" / "usable_cam1_train.csv")
+    assert f"{leaf_half}_cam1" in [r["image_id"] for r in usable1]
+    fail_ids = [r["image_id"] for r in _read_csv(out / "train" / "fail_train.csv")]
+    assert f"{leaf_half}_cam2" in fail_ids
+    assert f"{leaf_half}_cam1" not in fail_ids, "fail 清单只记检测失败,绝不把单边检出误标"
+
+    # Pitfall 8 警告信号永不触发:公共对数 <= min(两路检出数)
+    d1 = np.load(out / "train" / "cam1_train.npz", allow_pickle=False)
+    d2 = np.load(out / "train" / "cam2_train.npz", allow_pickle=False)
+    assert len(rows) <= min(int(d1["detected"].sum()), int(d2["detected"].sum()))
+    assert _tree_snapshot(tmp_path / "data") == before, "配对流程同样绝不允许改动 data/"
+
+
+def test_common_pairs_count_and_meta(synthetic_run):
+    """主夹具:g1/g2 两路均检出 → 恒 2 对(单边噪声组不入对);meta.json 记
+    common_pairs;公共对数 <= min(cam1, cam2 检出)(Pitfall 8 全量断言)。"""
+    out, _before = synthetic_run
+    rows = _read_csv(out / "train" / "common_fov_pairs_train.csv")
+    d1 = np.load(out / "train" / "cam1_train.npz", allow_pickle=False)
+    d2 = np.load(out / "train" / "cam2_train.npz", allow_pickle=False)
+    assert len(rows) == 2  # g1、g2;g3 只有 cam1(噪声)不成对
+    assert len(rows) <= min(int(d1["detected"].sum()), int(d2["detected"].sum()))
+    for cam in (1, 2):
+        meta = json.loads(
+            (out / "train" / f"cam{cam}_train.meta.json").read_text(encoding="utf-8"))
+        assert meta["common_pairs"] == 2
+
+
+def test_rerun_clears_stale_artifacts(tmp_path, monkeypatch, make_chessboard_image):
+    """Pitfall 7:运行前清理——重跑后孤儿文件(含手工塞进 visualization/ 的
+    stale.jpg)消失;两次运行 data/ 快照均不变;目录重建后产物仍齐全。"""
+    _build_synthetic_dataset(tmp_path, make_chessboard_image)
+    monkeypatch.chdir(tmp_path)
+    before = _tree_snapshot(tmp_path / "data")
+    preprocess()
+    out = tmp_path / "output"
+    vis = out / "train" / "visualization"
+    (vis / "stale.jpg").write_bytes(b"stale artifact from a previous run")
+    (out / "train" / "orphan.txt").write_text("orphan inside train split dir")
+
+    preprocess()  # 重跑:开头 rmtree 应把 train/test 产物目录整个重建
+    assert not (vis / "stale.jpg").exists(), "孤儿标注图必须随重跑消失(D-11 无残留)"
+    assert not (out / "train" / "orphan.txt").exists(), "产物子目录内的任何残留都要清掉"
+    assert _tree_snapshot(tmp_path / "data") == before, "重跑同样绝不允许改动 data/"
+    n_vis = len(list(vis.glob("*.jpg")))
+    n_detected = sum(int(np.load(out / "train" / f"cam{c}_train.npz",
+                                 allow_pickle=False)["detected"].sum())
+                     for c in (1, 2))
+    assert n_vis == n_detected == 4, "重建后标注图数仍须恰等于两路检出数之和"

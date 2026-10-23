@@ -104,6 +104,7 @@ def load_corners(path: Path | str) -> dict[str, np.ndarray]:
 
 _USABLE_FIELDS = ["image_id", "path", "cam", "route", "sq_px"]
 _FAIL_FIELDS = ["image_id", "path", "cam", "reason"]
+_COMMON_PAIR_FIELDS = ["group_id", "cam1_path", "cam2_path", "route_cam1", "route_cam2"]
 
 
 def write_usable_csv(path: Path | str, rows: list[dict]) -> Path:
@@ -126,6 +127,24 @@ def write_fail_csv(path: Path | str, rows: list[dict]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_FAIL_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def write_common_pairs_csv(path: Path | str, rows: list[dict]) -> Path:
+    """写公共视场对清单 CSV:列 = group_id, cam1_path, cam2_path, route_cam1,
+    route_cam2(PREP-04,Phase 3 双目外参标定的输入清单)。
+
+    一行 = 一个两路均检出的叶子目录组(group_id);行数恒 <= min(cam1 检出,
+    cam2 检出)(Pitfall 8 警告信号)。成对规则(两路均检出才入对)由编排层
+    pipeline 决定,这里只负责落盘——清单写空(仅表头)也合法(该 split 无
+    公共视场对)。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_COMMON_PAIR_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
     return path
