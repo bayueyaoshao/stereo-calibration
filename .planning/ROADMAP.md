@@ -74,7 +74,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete   | 2026-10-23 |
+| 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 0/? | Not started | - |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
