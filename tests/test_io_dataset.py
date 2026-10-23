@@ -94,6 +94,29 @@ def test_empty_leaf_dir_warns(in_data_dir):
     assert len(result.records) == 2
 
 
+def test_same_split_duplicate_leaf_dirs_warn_and_keep_first(in_data_dir):
+    """同划分不同父目录下同名叶子目录(CR-01):不再静默合并组——
+    「叶子目录重名」中文警告触发(既有去重措辞,现在对同划分碰撞可达),
+    只保留先出现者的记录;image_id/group_id 契约不变(配对键仍是叶子名,
+    不存在跨拍摄的双目错配)。"""
+    in_data_dir("data/train/20261023_154025/dup_leaf/cam1.jpg", 8, 8)
+    in_data_dir("data/train/20261023_154025/dup_leaf/cam2.jpg", 8, 8)
+    in_data_dir("data/train/20261023_154043/dup_leaf/cam1.jpg", 8, 8)
+    in_data_dir("data/train/20261023_154043/dup_leaf/cam2.jpg", 8, 8)
+
+    result = scan_dataset(DataDirs(train="data/train", test="data/test"))
+
+    assert any("重复" in w and "叶子目录重名" in w for w in result.warnings), \
+        f"同划分叶子重名必须触发去重警告,实际警告:{result.warnings}"
+    assert len(result.records) == 2, "同名叶子两组各两条,去重后恰留先出现者的 2 条"
+    by_id = {r.image_id: r for r in result.records}
+    assert set(by_id) == {"dup_leaf_cam1", "dup_leaf_cam2"}
+    for rec in by_id.values():
+        assert rec.group_id == "dup_leaf", "配对键契约:group_id 仍是叶子名"
+        assert "20261023_154025" in str(rec.path), \
+            f"保留的必须是先出现的 20261023_154025 下的文件,实际:{rec.path}"
+
+
 def test_imread_checked_raises_on_corrupt_file(in_data_dir):
     """坏文件读图:cv2.imread 返回 None,imread_checked 抛含文件名的中文 ValueError。"""
     bad = in_data_dir("data/train/20261023_154025/20261023_154025_519359/cam1.jpg", 8, 8)
