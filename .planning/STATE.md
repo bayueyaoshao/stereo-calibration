@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-10-23T23:30:00.000Z"
+status: blocked
+last_updated: "2026-10-24T00:05:00.000Z"
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 11
-  completed_plans: 11
-  percent: 100
+  total_plans: 12
+  completed_plans: 10
+  percent: 83
 ---
 
 # STATE: 双目相机标定生产工具
@@ -23,13 +23,13 @@ progress:
 
 ## Current Position
 
-Phase: 3 (模块3-双目标定) — BLOCKED(联合 BA gap-closure 03-05 收敛裁决三变体全灭,失败协议停止)
-Plan: 5 of 5 executed
+Phase: 3 (模块3-双目标定) — BLOCKED(SC3 16.93mm FAIL,夜间全链诊断完毕,待用户晨间决策)
+Plan: 5 of 5 executed + code review 修复 + verification 完成
 
 - **Phase:** 3
-- **Plan:** 03-05(blocked,失败协议)
-- **Status:** Phase 3 gap-closure 裁决完毕,交 orchestrator 决策
-- **Progress:** ▩▩▩▩▩ 11/11 plans executed(03-05 联合 BA 引擎落地但裁决全灭:内参漂移全部越诊断界,SC3 达标与内参可信结构性不可兼得)
+- **Plan:** 03-04/03-05(blocked,失败协议,诊断完整)
+- **Status:** 过夜工作收口,晨间报告在 .planning/MORNING-REPORT-2026-10-24.md
+- **Progress:** ▩▩▩▩▢ 10/12 plans complete(03-04/03-05 诚实 blocked)
 
 ```
 [----------] 0%  Phase 1 of 3
@@ -63,7 +63,8 @@ Plan: 5 of 5 executed
 ### Blockers
 
 - SC3 生产验收 FAIL:test 距离残差 16.93mm ≫ 5mm(03-04-SUMMARY 完整诊断)。根因:两路独立内参在双目精度下互不兼容(相对位姿逐对散布中位 2.5°/max 12.2°)+ 支架跨帧摆动;刚性外参+固定内参模型在本数据不可达
-- 联合 BA 预案已被 03-05 收敛裁决否决:三变体全灭(漂移越界为致命判据,SC3 达标与内参物理可信结构性不可兼得)。可选后续(需新计划,交 orchestrator/用户决策):(a) Phase 2 协方差作先验强度的内参不确定度传播;(b) 只放主点(冻结 f/D)的第四变体消融;(c) 接受 rigid 16.93mm 现状改验收口径(需用户决策)
+- 联合 BA 预案已被 03-05 收敛裁决否决:三变体全灭(漂移越界为致命判据,SC3 达标与内参物理可信结构性不可兼得)
+- **内参可辨识性诊断(2026-10-24 晨,/tmp/ident_diag_0326.py)终审:Phase 2 内参被数据强钉死(σ(fx)/fx ≈ 0.3–0.9%,profile likelihood),联合 BA 漂移 12σ–156σ 非物理解**——方向 (a) 协方差先验、(b) 只放主点均被数字否决;结论:问题在采集物理(支架刚性/同步),推荐采集整改后重跑现有链;备选逐对外参管线(放弃公共 R/T)需用户决策(03-HUMAN-UAT HUMAN-4)
 
 ### Quick Tasks Completed
 
@@ -71,12 +72,13 @@ Plan: 5 of 5 executed
 |---|-------------|------|--------|-----------|
 | 261023-wp3 | 修复 phase 1 code review 三个高价值发现(CR-01 分组键、WR-01 窗口阶梯、WR-02 失败标签) | 2026-10-23 | de3daae | [261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02](./quick/261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02/) |
 | 261024-cr02 | 修复 phase 2 code review CR-01/WR-01/WR-02(异常收口三层防线、配置类型守卫、jac_sparsity 死代码),124 测试,生产重跑逐位复现 0.1407/0.1361 | 2026-10-24 | 8cd1231 | [261024-cr02-phase2-review-critical-warning](./quick/261024-cr02-phase2-review-critical-warning/) |
+| 261024-cr03 | 修复 phase 3 code review CR-01/WR-01/WR-02(joint.enabled fail-closed 硬门、train 评估降级收口、pairs CSV 中文收口),214 测试,生产重跑留痕形态不变 | 2026-10-24 | 6910b96 | [261024-cr03-phase3-review-critical-warning](./quick/261024-cr03-phase3-review-critical-warning/) |
 
 ## Session Continuity
 
-- **Last action:** Phase 3 wave 5(03-05)执行完毕:联合 BA 引擎 TDD 落地(209 测试绿),收敛裁决三变体全灭(漂移越界),失败协议——config.yaml 零 diff、跳过 T3/T4、REQUIREMENTS 未勾选 (2026-10-24)
-- **Next action:** 晨间向用户交 03-05 诊断报告;Phase 3 后续方向(内参不确定度传播 / 只放主点变体 / 验收口径变更)待决策
-- **Notes:** data/ 指纹 a183699d 全程不变;output/stereo/ 保持 03-04 正式配置诚实失败留痕;裁决数值表在 /tmp/joint_trial_0305_result.md(已引用进 03-05-SUMMARY);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2)
+- **Last action:** 过夜工作收口(2026-10-24 08:00 前):Phase 3 全链交付 + 03-04/03-05 诚实 blocked + code review 三修复(214 测试)+ verification(实现 4/4 VERIFIED,指标 0/4)+ 03-HUMAN-UAT(4 项)+ 内参可辨识性终审诊断 + 晨间报告 `.planning/MORNING-REPORT-2026-10-24.md`
+- **Next action:** 用户晨间读晨报 → 03-HUMAN-UAT 四项(重点 HUMAN-4 方向决策:推荐采集整改后重跑现有链)
+- **Notes:** data/ 指纹 a183699d 全程不变;output/intrinsic/ 为 Phase 2 有效产物;output/stereo/ 为诚实失败留痕;裁决数值 /tmp/joint_trial_0305_result.md、诊断脚本 /tmp/ident_diag_0326.py(/tmp 重启即失,重算可向助手索取);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2) + 03-HUMAN-UAT(4)
 
 ---
 *Initialized 2026-10-23 during roadmap creation*
