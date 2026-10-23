@@ -1,7 +1,8 @@
-"""角点核心三件套的不变量锁定测试:窗口断言、排序规范化、SB 检测精度、源码防线。
+"""角点核心三件套的不变量锁定测试:窗口断言、排序规范化、双检测器精度、源码防线。
 
-移植自参考工程 tests/test_corners.py(只读引用,绝不修改),按本计划
-(01-01 仅 SB 主路线)裁剪:classic 精度/缺陷闸门测试随 01-02 一并落地。
+移植自参考工程 tests/test_corners.py(只读引用,绝不修改):01-01 落地
+SB 主路线与规范化/窗口断言,01-02 追加 classic 兜底(精度/缺陷闸门/两路
+序一致性)并把源码防线升级为「全文件恰好 1 次精化调用」。
 
 源码防线注意:测试与注释里都不写出二次精化的调用串原文,否则子串计数
 防线自伤(计数对象是 detect.py 的源文本,不是本文件)。
@@ -13,7 +14,7 @@ import numpy as np
 import pytest
 
 from stereo_calib.corners.canonical import canonicalize
-from stereo_calib.corners.detect import detect_sb
+from stereo_calib.corners.detect import detect_classic, detect_sb, grid_defects
 from stereo_calib.corners.window import derive_window_frame, estimate_sq_px
 from stereo_calib.io.config import CornersConfig
 
@@ -109,11 +110,78 @@ def test_detect_sb_returns_none_on_pure_noise():
     assert detect_sb(noise, 11, 8, _CFG) is None
 
 
-def test_detect_sb_source_guard_no_refinement_call():
-    """源码防线:01-01 阶段 detect.py 里二次精化的调用形式出现次数为 0
-    (SB 路线严禁二次精化;01-02 落地 classic 后本断言改为 == 1)。"""
+def test_detect_source_guard_single_refinement_call():
+    """源码防线:二次亚像素精化的调用形式在 detect.py 里恰好只出现 1 次
+    (只许 classic 分支的 _subpix_refine 一处实际调用,SB 路线严禁二次精化);
+    SB 分支的注释用「二次亚像素精化」中文措辞,不会误撞这个断言。"""
     source = pathlib.Path("src/stereo_calib/corners/detect.py").read_text(encoding="utf-8")
-    assert source.count("cv2.cornerSubPix(") == 0, (
-        "二次亚像素精化的调用形式在本阶段必须出现 0 次(classic 未落地);"
+    assert source.count("cv2.cornerSubPix(") == 1, (
+        "二次亚像素精化的调用形式必须全文件恰好出现 1 次(只许经典分支调用);"
         "SB 路线再精化属于头号污染错误"
     )
+
+
+# ---------- classic 兜底路线(01-02 追加)----------
+
+def test_detect_classic_accuracy_within_half_pixel(make_chessboard_image):
+    """合成图上 classic 检测器检出,角点对真值的逐点最大定位误差 < 0.5px;
+    干净合成图零缺陷、不触发恢复;返回的窗口也满足 2*win+1 < sq_px。"""
+    img, corners, _ = make_chessboard_image(degrade="blur")
+    result = detect_classic(img, 11, 8, _CFG)
+    assert result is not None, "classic 检测器未检出合成棋盘"
+    assert result["detector"] == "classic"
+    assert result["uv"].shape == (88, 2)
+    assert result["uv"].dtype == np.float64
+    assert result["recovery"] is None, "干净合成图不该触发缺陷闸门恢复"
+    truth = canonicalize(corners, 11, 8)
+    max_err = float(np.linalg.norm(result["uv"] - truth, axis=1).max())
+    assert max_err < 0.5, f"classic 最大定位误差 {max_err:.3f}px 超过 0.5px"
+    assert 2 * result["win_size"] + 1 < result["sq_px"]  # 不变量 2 同样成立
+
+
+def test_detect_classic_returns_none_on_pure_noise():
+    """纯噪声图:classic 未检出,统一返回 None(不返回半成品)。"""
+    rng = np.random.default_rng(0)
+    noise = rng.integers(0, 255, size=(480, 640), dtype=np.uint8)
+    assert detect_classic(noise, 11, 8, _CFG) is None
+
+
+def test_sb_and_classic_canonical_uv_agree(make_chessboard_image):
+    """两颗检测器对同一合成图各自规范化后,同编号角点逐点接近
+    (RESEARCH Pattern 4 的测试化):SB/classic 原始角点序不同(本数据实测
+    同编号原始差 355.9px 中位),序一致性全靠 canonicalize 保证——不过这层,
+    同编号角点会指到棋盘对侧。两颗各自对真值误差 < 0.5px,故同编号互差
+    < 1.0px;序错位时量级是数百像素,1px 容差足以区分两种世界。"""
+    img, _corners, _ = make_chessboard_image(degrade="blur")
+    sb = detect_sb(img, 11, 8, _CFG)
+    classic = detect_classic(img, 11, 8, _CFG)
+    assert sb is not None and classic is not None
+    assert np.allclose(sb["uv"], classic["uv"], atol=1.0, rtol=0.0), (
+        "SB 与 classic 规范化后同编号角点不一致(canonicalize 防线失效?)"
+    )
+
+
+# ---------- 缺陷闸门与窗口阶梯恢复(参考工程事故复盘的移植)----------
+
+def test_grid_defects_clean_grid_has_zero(make_chessboard_image):
+    """干净网格(强侧转真值角点,间距本来就渐变)必须数出零缺陷:
+    闸门只抓硬伤,不许对正常透视误报。"""
+    _img, corners, _ = make_chessboard_image(
+        square_px=24.0, rvec=np.array([0.0, 0.35, 0.0]))
+    d = grid_defects(corners, 11, 8)
+    assert d["total"] == 0, f"干净网格被误报缺陷:{d}"
+    assert d["n_dup"] == 0 and d["n_zigzag"] == 0
+
+
+def test_grid_defects_flags_duplicate_and_zigzag(make_chessboard_image):
+    """两类硬伤都必须被抓到:相邻角点被压到同处(间距 0 < 0.25×中位方格,
+    重复点)+ 中间一点被拉离原位(间距突变,锯齿)。"""
+    _img, corners, _ = make_chessboard_image(square_px=24.0)
+    bad = corners.copy()
+    g = bad.reshape(8, 11, 2)
+    g[1, 10] = g[1, 9]                # 重复点:相邻两角点叠在同处
+    g[4, 5] += np.array([0.0, -8.0])  # 锯齿:列方向中间一点被拉离原位
+    d = grid_defects(bad, 11, 8)
+    assert d["n_dup"] >= 1, f"重复点没被抓到:{d}"
+    assert d["n_zigzag"] >= 1, f"锯齿没被抓到:{d}"
+    assert d["total"] == d["n_dup"] + d["n_zigzag"] > 0
