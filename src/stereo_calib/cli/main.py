@@ -84,7 +84,11 @@ def intrinsic() -> None:
         from stereo_calib.intrinsic.pipeline import run_intrinsic
 
         run_intrinsic(load_config(_config_path))
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, ArithmeticError, RuntimeError,
+            AssertionError, cv2.error) as e:
+        # 数值路径异常家族(含精化期 models.project 的 Z>0 数据防卫断言与
+        # OpenCV 报错)与坏输入同样收口为中文一句,绝不吐堆栈;正常的单路
+        # 失败已在编排层降级留痕,这里兜最外层的底。
         typer.echo(f"内参标定失败:{e}")
         typer.echo("  请检查 config.yaml 配置与 Phase 1 产物(output/ 下的角点 npz),"
                    "修正后重跑 stereo-calib intrinsic。")

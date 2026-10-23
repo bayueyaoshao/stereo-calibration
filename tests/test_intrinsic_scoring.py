@@ -91,6 +91,24 @@ def test_score_pose_only_nan_input_returns_failure_not_raise():
     assert "NaN" in score.note or "非数值" in score.note
 
 
+def test_score_pose_only_mid_refine_zle0_assertion_returns_failure_not_raise():
+    """精化期 Z<=0 数据防卫断言 → 收口为单帧失败,绝不抛(CR-01 回归,真实路径)。
+
+    触发原理:少数角点被大幅劣化后 solvePnP 仍返回 ok=True,但其位姿在
+    least_squares 的试验步里把板点挪到相机身后,models.project 的 Z>0
+    防卫(数据相关断言,入口防线拦不住)从优化器内部抛 AssertionError——
+    断言类异常不在旧捕获面 (ValueError, ArithmeticError, RuntimeError,
+    cv2.error) 内,会炸掉整批运行;修复后必须返回失败 PoseScore。
+    """
+    uv = _synthetic_frame(np.array([0.25, -0.15, 0.10]), np.array([-30.0, 20.0, 650.0]))
+    uv[:6] += 3000.0
+    score = score_pose_only(uv, _object_points(), _PARAMS_TRUE)
+    assert np.isnan(score.rms), "触发 Z<=0 防卫的帧必须按单帧失败返回 NaN,而不是抛异常"
+    assert score.residuals is None
+    assert "只估位姿求解失败" in score.note and "AssertionError" in score.note, (
+        f"失败备注必须写明病因与异常类型,实际:{score.note!r}")
+
+
 # ---------- 4. 源码防线:反投影初值路线 + 数学只经 models ----------
 
 def test_scoring_source_guard_unproject_route():

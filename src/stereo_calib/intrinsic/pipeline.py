@@ -35,6 +35,7 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
+import cv2
 import numpy as np
 import typer
 
@@ -238,7 +239,14 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
 
 
 def run_intrinsic(cfg: StereoCalibConfig) -> None:
-    """模块2 主流程:两路相机串行标定 + train 离群自动剔除 + test 评分 + 落盘。"""
+    """模块2 主流程:两路相机串行标定 + train 离群自动剔除 + test 评分 + 落盘。
+
+    单路失败收口:某一路的求解/评分抛出数值路径异常(ValueError/
+    ArithmeticError/RuntimeError/AssertionError/cv2.error,含精化期
+    models.project 的 Z>0 数据防卫)时,该路降级为失败记录,另一路继续
+    跑完并正常落盘,report.md 如实留痕——一路的退化帧绝不炸掉整批双路
+    运行(评分器"单帧失败不中断整批"契约在编排层的对应兜底)。
+    """
     intrinsic_root = Path(cfg.output_root) / "intrinsic"
 
     # ---- 运行前清理(D-11 固定覆盖 + 防残留)----
@@ -256,7 +264,21 @@ def run_intrinsic(cfg: StereoCalibConfig) -> None:
     summaries: list[dict] = []
     artifacts: list[Path] = []
     for cam in _CAMS:
-        summary, cam_artifacts = _calibrate_one_cam(cfg, cam, intrinsic_root)
+        try:
+            summary, cam_artifacts = _calibrate_one_cam(cfg, cam, intrinsic_root)
+        except (ValueError, ArithmeticError, RuntimeError, AssertionError, cv2.error) as e:
+            # 单路失败降级:记录带 failed 标记的最小汇总(其余字段给中性
+            # 空值,报告照常渲染),另一路继续——绝不向上抛中断整批。
+            typer.echo(f"cam{cam}:该路标定失败,降级为失败记录(另一路继续):"
+                       f"{type(e).__name__}——{e}")
+            summaries.append({
+                "cam": cam, "failed": True,
+                "error": f"{type(e).__name__}——{e}",
+                "dropped_frames": [],
+                "outlier_loop": "该路求解失败,剔除循环未完成(失败原因见失败留痕)",
+                "train_per_view_rms": [], "test_per_view_rms": [],
+            })
+            continue
         summaries.append(summary)
         artifacts.extend(cam_artifacts)
 
@@ -268,6 +290,10 @@ def run_intrinsic(cfg: StereoCalibConfig) -> None:
     # ---- 中文汇总:逐路幸存/剔除、train/test RMS、PASS/FAIL、产物路径 ----
     typer.echo("内参标定完成,产物已写盘。逐路指标:")
     for s in summaries:
+        if s.get("failed"):
+            typer.echo(f"  cam{s['cam']}:失败(该路无产物,失败原因见 report.md 失败留痕)"
+                       f"——{s['error']}")
+            continue
         ok = np.isfinite(s["rms_test_overall"]) and s["rms_test_overall"] <= cfg.intrinsic.rms_test_max
         verdict = "PASS" if ok else "FAIL"
         typer.echo(f"  cam{s['cam']}:train RMS {s['rms_train_overall']:.4f}px,"

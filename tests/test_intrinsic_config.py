@@ -118,3 +118,27 @@ def test_missing_intrinsic_section_falls_back_to_defaults(tmp_path):
     assert cfg.intrinsic.refine.enabled is True
     assert cfg.intrinsic.outlier.rms_multiplier == pytest.approx(5.0)
     assert cfg.intrinsic.exclude_images == ()
+
+
+@pytest.mark.parametrize(
+    ("bad_yaml"),
+    [
+        # 集合成员检查字段遇上容器型值(WR-01):修复前抛 TypeError(unhashable,
+        # 击穿 CLI 异常网),修复后必须收口为中文 ValueError。
+        # method 走 _mutate(独立行);window_granularity 在 flow 式 subpix 行里,
+        # _mutate 按行首键匹配够不到,对模板做定向替换。
+        pytest.param(_mutate("method", "[trf]"), id="method-list"),
+        pytest.param(_mutate("method", "{a: b}"), id="method-dict"),
+        pytest.param(MINIMAL_YAML.replace("window_granularity: frame",
+                                          "window_granularity: [frame]"),
+                     id="granularity-list"),
+        pytest.param(MINIMAL_YAML.replace("window_granularity: frame",
+                                          "window_granularity: {a: b}"),
+                     id="granularity-dict"),
+    ],
+)
+def test_container_typed_membership_values_raise_chinese_valueerror(tmp_path, bad_yaml):
+    """容器型 yaml 值(method: [trf] / window_granularity: {a: b})→ 中文
+    ValueError,绝不抛 TypeError(配置畸形路径不许击穿 CLI 异常网,WR-01)。"""
+    with pytest.raises(ValueError, match="不合法"):
+        load_config(_write_config(tmp_path, bad_yaml))

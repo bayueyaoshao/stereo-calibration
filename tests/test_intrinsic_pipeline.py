@@ -665,6 +665,40 @@ def test_e2e_rerun_clears_stale_and_data_readonly(tmp_path, monkeypatch,
     assert _tree_snapshot(tmp_path / "data") == before, "intrinsic 流程绝不允许改动 data/"
 
 
+def test_run_intrinsic_single_camera_failure_degrades_not_aborts(tmp_path, monkeypatch,
+                                                                 make_chessboard_image):
+    """编排层单路失败收口:cam2 定稿求解抛 AssertionError(模拟精化期
+    models.project 的 Z>0 数据防卫)→ 该路降级为失败记录,cam1 照常跑完
+    落盘,report.md 如实留痕失败段,run_intrinsic 绝不向外抛(CR-01 回归)。"""
+    _build_run_tree(tmp_path, make_chessboard_image)
+    monkeypatch.chdir(tmp_path)
+
+    import stereo_calib.intrinsic.pipeline as pipeline_mod
+
+    real_solve = pipeline_mod.solve_calibration
+    refined_calls = {"n": 0}
+
+    def flaky_solve(uvs, objp, image_size, refine_cfg):
+        # 剔除循环走 no_refine(enabled=False);带精化的定稿求解每路恰一次、
+        # 按cam 序串行——第 2 次精化调用即 cam2,精准注入单路失败。
+        if refine_cfg.enabled:
+            refined_calls["n"] += 1
+            if refined_calls["n"] == 2:
+                raise AssertionError("project 收到 Z<=0 的点(测试注入:模拟数据防卫触发)")
+        return real_solve(uvs, objp, image_size, refine_cfg)
+
+    monkeypatch.setattr(pipeline_mod, "solve_calibration", flaky_solve)
+    _run_intrinsic_in(tmp_path)  # 不抛即第一契约:单路失败不中断整批
+
+    root = tmp_path / "output" / "intrinsic"
+    assert (root / "cam1" / "intrinsics.json").is_file(), "成功路必须照常跑完并落盘"
+    assert not (root / "cam2").exists(), "失败路不得留下半套产物"
+    report = (root / "report.md").read_text(encoding="utf-8")
+    assert "## 失败留痕" in report and "AssertionError" in report, (
+        "报告必须如实留痕失败路与其病因")
+    assert "cam1" in report, "成功路必须照常出现在报告中(不受失败路影响)"
+
+
 def test_pipeline_and_artifacts_source_guards():
     """源码防线:pipeline 零数学(投影/求解内部符号不得出现,只准编排);
     artifacts 零数学且 JSON 契约字段表存在(字段全集测试已单独锁定)。"""
@@ -708,3 +742,21 @@ def test_cli_intrinsic_happy_path_end_to_end(tmp_path, monkeypatch, make_chessbo
         assert (root / f"cam{cam}" / "intrinsics.json").is_file()
         assert (root / f"per_frame_cam{cam}.csv").is_file()
     assert (root / "report.md").is_file()
+
+
+def test_cli_intrinsic_numeric_exception_family_chinese_exit_one(tmp_path, monkeypatch):
+    """数值路径异常家族(AssertionError 等,CR-01)逃出编排层时,CLI 仍收口为
+    退出码 1,绝不吐堆栈(最外层中文收口防线对异常家族的扩展锁定)。"""
+    (tmp_path / "config.yaml").write_text(_E2E_CONFIG_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_main, "_config_path", pathlib.Path("config.yaml"))
+
+    import stereo_calib.intrinsic.pipeline as pipeline_mod
+
+    def boom(cfg):
+        raise AssertionError("project 收到 Z<=0 的点(测试注入)")
+
+    monkeypatch.setattr(pipeline_mod, "run_intrinsic", boom)
+    with pytest.raises(typer.Exit) as ei:
+        cli_main.intrinsic()
+    assert ei.value.exit_code == 1, "数值路径异常家族必须同样收口为退出码 1"
