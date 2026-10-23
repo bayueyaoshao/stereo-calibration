@@ -102,6 +102,10 @@ Plans:
 
 - [x] 03-04-PLAN.md — CLI 一条命令 + 真实数据全量生产运行 + 四条成功标准验收(STER-01/02/03/04)〔已执行,结果 blocked:SC3 FAIL 16.93mm,REQUIREMENTS 未勾选,详见 03-04-SUMMARY〕
 
+**Wave 5** *(gap-closure, blocked on Wave 4)*
+
+- [ ] 03-05-PLAN.md — 联合 BA gap-closure(内参+公共外参+逐对位姿,结构化变体 + Tikhonov 先验,收敛裁决先行)(STER-01/02/03/04)
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
