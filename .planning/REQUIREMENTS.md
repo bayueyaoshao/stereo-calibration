@@ -10,7 +10,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### 模块1 — 数据预处理 (PREP)
 
 - [ ] **PREP-01**: 读取 YAML 配置文件(棋盘格规格、数据路径、输出路径、角点检测参数),命令行零算法参数
-- [ ] **PREP-02**: 对每路相机全部图像做棋盘格角点检测:SB 主路线(输出已亚像素,严禁二次精化)+ classic 兜底(cornerSubPix 窗口从本帧实测方格像素边长推导),支持多进程并行加速
+- [x] **PREP-02**: 对每路相机全部图像做棋盘格角点检测:SB 主路线(输出已亚像素,严禁二次精化)+ classic 兜底(cornerSubPix 窗口从本帧实测方格像素边长推导),支持多进程并行加速
 - [ ] **PREP-03**: 输出每路相机"棋盘格完整可用"图像清单
 - [ ] **PREP-04**: 输出两路相机公共视场图像对清单(同组目录两路均检测成功的图像对)
 - [ ] **PREP-05**: 输出所有成功图像的角点数据文件(2D 角点坐标 + 对应 3D 板系坐标 + 图像索引)
@@ -59,7 +59,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | PREP-01 | Phase 1 | Pending |
-| PREP-02 | Phase 1 | Pending |
+| PREP-02 | Phase 1 | Complete (01-02) |
 | PREP-03 | Phase 1 | Pending |
 | PREP-04 | Phase 1 | Pending |
 | PREP-05 | Phase 1 | Pending |
@@ -83,4 +83,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-23 after roadmap creation (traceability filled)*
+*Last updated: 2026-10-23 after 01-02 (PREP-02 complete: classic 兜底 + joblib 并行落地)*
