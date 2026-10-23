@@ -12,9 +12,9 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **PREP-01**: 读取 YAML 配置文件(棋盘格规格、数据路径、输出路径、角点检测参数),命令行零算法参数
 - [x] **PREP-02**: 对每路相机全部图像做棋盘格角点检测:SB 主路线(输出已亚像素,严禁二次精化)+ classic 兜底(cornerSubPix 窗口从本帧实测方格像素边长推导),支持多进程并行加速
 - [ ] **PREP-03**: 输出每路相机"棋盘格完整可用"图像清单
-- [ ] **PREP-04**: 输出两路相机公共视场图像对清单(同组目录两路均检测成功的图像对)
+- [x] **PREP-04**: 输出两路相机公共视场图像对清单(同组目录两路均检测成功的图像对)
 - [ ] **PREP-05**: 输出所有成功图像的角点数据文件(2D 角点坐标 + 对应 3D 板系坐标 + 图像索引)
-- [ ] **PREP-06**: 输出角点可视化抽查图(绘制检测角点,便于人工核验)
+- [x] **PREP-06**: 输出角点可视化抽查图(绘制检测角点,便于人工核验)
 
 ### 模块2 — 内参标定 (INTR)
 
@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **INFRA-01**: 三个模块独立 CLI 入口,可单独运行调试,上游输出即下游输入,文件接口明确
 - [ ] **INFRA-02**: 全部传参由配置文件控制,禁止硬编码算法参数
-- [ ] **INFRA-03**: data/ 目录只读,所有中间产物/结果写入独立输出目录
+- [x] **INFRA-03**: data/ 目录只读,所有中间产物/结果写入独立输出目录
 
 ## v2 Requirements
 
@@ -61,9 +61,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PREP-01 | Phase 1 | Pending |
 | PREP-02 | Phase 1 | Complete (01-02) |
 | PREP-03 | Phase 1 | Pending |
-| PREP-04 | Phase 1 | Pending |
+| PREP-04 | Phase 1 | Complete (01-03) |
 | PREP-05 | Phase 1 | Pending |
-| PREP-06 | Phase 1 | Pending |
+| PREP-06 | Phase 1 | Complete (01-03) |
 | INTR-01 | Phase 2 | Pending |
 | INTR-02 | Phase 2 | Pending |
 | INTR-03 | Phase 2 | Pending |
@@ -74,7 +74,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STER-04 | Phase 3 | Pending |
 | INFRA-01 | Phase 1 | Pending |
 | INFRA-02 | Phase 1 | Pending |
-| INFRA-03 | Phase 1 | Pending |
+| INFRA-03 | Phase 1 | Complete (01-03) |
 
 **Coverage:**
 - v1 requirements: 17 total
@@ -83,4 +83,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-23 after 01-02 (PREP-02 complete: classic 兜底 + joblib 并行落地)*
+*Last updated: 2026-10-23 after 01-03 (PREP-04/PREP-06/INFRA-03 complete: 公共视场配对 + 全量可视化 + data 只读全量硬验证;注:PREP-01/03/05/INFRA-01/02 已由 01-01 落地但当时未勾选,留待 orchestrator/verifier 补记)*
