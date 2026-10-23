@@ -13,7 +13,6 @@ import pathlib
 import cv2
 import numpy as np
 import pytest
-
 from conftest import SynthStereo, make_stereo_synth
 
 from stereo_calib.intrinsic import models
@@ -119,21 +118,29 @@ def test_triangulate_dlt_signed_homogeneous_division():
 
 
 def test_undist_pix_pixel_frame_contract():
-    """undist_pix 必须返回针孔【像素】坐标(第 5 参传 K),不是归一化坐标:
-    与 K @ undistortPoints(..., None) 的解析关系一致到浮点噪声级,cv2 内部
-    float32 装包决定逐点差在 1e-4 px 量级(锁 1e-3 px);归一化泄漏(值
-    掉到 1e-3 量级)当场抓住。"""
+    """undist_pix 必须返回针孔【像素】坐标,不是归一化坐标,且是畸变正映射
+    的精确逆:与「models.unproject 精确逆 × K」逐点一致到 1e-6 px;归一化
+    泄漏(值掉到 1e-3 量级)当场抓住。
+
+    不用 cv2.undistortPoints 当基准:它是定点迭代,本工程强畸变域实测
+    r²=0.5 处逆误差已有 0.28px、r²=1.0 处 8px(Rule 1 修复的根因),
+    只配当量级 sanity(<1px)不配当契约。"""
     synth = make_stereo_synth(n_pairs=1, seed=7)
     pts = synth.uv1[0]
     got = undist_pix(pts, synth.K1, synth.D1)
     assert got.shape == (88, 2)
+    params = np.asarray(synth.params1, dtype=np.float64)
+    rays = models.unproject(pts, params)
+    expected = (rays[:, :2] / rays[:, 2:3]) @ synth.K1[:2, :2].T + synth.K1[:2, 2]
+    assert np.abs(got - expected).max() < 1e-6, (
+        "undist_pix 与「精确逆归一化坐标再乘 K」的像素口径关系被破坏")
+    assert np.abs(got).max() > 100.0, "返回值掉到归一化量级 = P=K 口径丢失(Pitfall 4)"
+    # cv2 迭代逆只作量级 sanity:同口径但精度差(见 docstring)
     norm = cv2.undistortPoints(
         pts.astype(np.float32).reshape(-1, 1, 2),
         synth.K1, synth.D1.reshape(-1, 1), None, None).reshape(-1, 2)
-    expected = (np.column_stack([norm, np.ones(len(norm))]) @ synth.K1.T)[:, :2]
-    assert np.abs(got.astype(np.float64) - expected).max() < 1e-3, (
-        "undist_pix 与「归一化坐标再乘 K」的像素口径关系被破坏")
-    assert np.abs(got).max() > 100.0, "返回值掉到归一化量级 = P=K 口径丢失(Pitfall 4)"
+    cv2_pix = (np.column_stack([norm, np.ones(len(norm))]) @ synth.K1.T)[:, :2]
+    assert np.abs(got - cv2_pix).max() < 1.0, "与 cv2 口径差超过 1px = 语义分叉"
 
 
 # ---------- 180° 消歧(锚 = 当帧 cam1 PnP) ----------
@@ -180,17 +187,20 @@ def test_disambiguate_frame_full_flip_metric_invariant():
 
 def test_frame_pose_ba_recovers_known_pose_strong_tilt():
     """强倾角已知位姿帧 → BA 恢复位姿 pooled RMS < 0.5px,与真值位姿的
-    投影一致性 < 0.2px(unproject 反投影初值路线,不进错误盆地)。"""
+    投影一致性 < 0.2px(unproject 反投影初值路线,不进错误盆地)。
+    观测用 models.project 合成(带畸变原始像素 = 生产口径,PnP/BA 链路
+    契约 Pitfall 3);喂针孔像素会让「带畸变正映」对不上「无畸变观测」,
+    位姿再准也压不掉畸变量级的残差底。"""
     synth = make_stereo_synth(n_pairs=1, seed=7)
     intr1, intr2 = _intr_views(synth)
     objp = synth.objp
     rvec_true = np.array([0.45, -0.35, 0.25])  # 强倾角(约 36°)
     tvec_true = np.array([30.0, -20.0, 600.0])
     x1_true, _ = models.transform_to_camera(objp, rvec_true, tvec_true)
-    uv1 = _pinhole_project(x1_true, synth.K1) + np.random.default_rng(3).normal(
+    uv1 = models.project(x1_true, synth.params1) + np.random.default_rng(3).normal(
         0.0, 0.02, (88, 2))
     x2_true = x1_true @ synth.R_rel_true.T + synth.t_rel_true
-    uv2 = _pinhole_project(x2_true, synth.K2) + np.random.default_rng(4).normal(
+    uv2 = models.project(x2_true, synth.params2) + np.random.default_rng(4).normal(
         0.0, 0.02, (88, 2))
 
     rvec, tvec, rms = frame_pose_ba(uv1, uv2, objp, intr1, intr2,
@@ -249,7 +259,8 @@ def test_evaluate_source_guards():
     assert source.count("_distort") == 0, "畸变公式只准经 intrinsic.models(单一数学源)"
     assert source.count("abs(") == 0, "保号除法纪律:齐次分量除法严禁绝对值(Pitfall 5)"
     assert "np.linalg.svd" in source, "DLT 的 SVD 必须在本文件(三角化唯一住址)"
-    assert "undistortPoints" in source and '"trf"' in source
+    assert "unproject" in source and '"trf"' in source, (
+        "去畸变必须走 models.unproject 精确逆 + 位姿 BA 必须是 trf")
     assert "kabsch" not in source.lower(), "分轴对齐诊断不移植(决策 6:MVP 指标 = 对角距离残差)"
     stereo_dir = pathlib.Path("src/stereo_calib/stereo")
     for path in stereo_dir.glob("*.py"):
