@@ -23,6 +23,10 @@ _ALLOWED_CLASSIC_FLAGS = {"adaptive_thresh", "normalize_image", "fast_check"}
 # 亚像素窗口粒度的合法取值:frame = 每帧一个窗口;corner = 逐角点局部自适应
 _ALLOWED_GRANULARITY = {"frame", "corner"}
 
+# scipy 精化的求解方法白名单:'lm' 只支持稠密雅可比,本工程走稀疏路径,
+# 参考工程配置层直接拒收的防呆照搬(白名单只收 "trf")
+_ALLOWED_REFINE_METHODS = {"trf"}
+
 
 @dataclass(frozen=True)
 class BoardSpec:
@@ -83,6 +87,51 @@ class PreprocessConfig:
 
 
 @dataclass(frozen=True)
+class RefineConfig:
+    """模块2 scipy 精化:开关 + 求解方法 + 迭代上限 + 收敛容差。
+
+    OpenCV 初值(calibrateCameraExtended)之后的一次联合精化开关由配置
+    控制(成功标准 1);容差默认值取参考工程实测收敛组合(ftol=1e-10 /
+    xtol=1e-12 / gtol=1e-10),xtol 压到机器精度量级保住收敛精度。
+    """
+
+    enabled: bool = True
+    method: str = "trf"
+    max_nfev: int = 300
+    ftol: float = 1.0e-10
+    xtol: float = 1.0e-12
+    gtol: float = 1.0e-10
+
+
+@dataclass(frozen=True)
+class OutlierConfig:
+    """模块2 自动离群帧剔除:判离群阈值 + 双保险丝 + 幸存视图数下限。
+
+    逐帧 RMS > rms_multiplier × 幸存集中位数判离群(中位数基准稳健);
+    max_drop_fraction / max_iterations 是剔除循环的双保险丝(防阈值漂移
+    不收敛 / 防吃掉过多视图);min_views 是剔除后幸存视图数下限,低于
+    此数直接报错不硬算(两三个视角定不了内参)。只作用于 train,test
+    永不剔除只标记(考卷不可改)。
+    """
+
+    enabled: bool = True
+    rms_multiplier: float = 5.0
+    max_drop_fraction: float = 0.2
+    max_iterations: int = 3
+    min_views: int = 10
+
+
+@dataclass(frozen=True)
+class IntrinsicConfig:
+    """模块2 内参标定段:精化 / 离群剔除 / test 阈值 / 手动剔除清单。"""
+
+    refine: RefineConfig = field(default_factory=RefineConfig)
+    outlier: OutlierConfig = field(default_factory=OutlierConfig)
+    rms_test_max: float = 1.0
+    exclude_images: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class StereoCalibConfig:
     """config.yaml 解析结果:全流程参数的唯一载体(D-10 单一文件分段)。"""
 
@@ -91,6 +140,7 @@ class StereoCalibConfig:
     output_root: str = "output"
     cv2_threads: int = 0
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    intrinsic: IntrinsicConfig = field(default_factory=IntrinsicConfig)
 
 
 def _fail(field_name: str, actual, requirement: str) -> None:
@@ -245,6 +295,99 @@ def _parse_preprocess(raw: dict) -> PreprocessConfig:
                             copy_fail_originals=copy_fail, jpeg_quality=quality)
 
 
+def _parse_refine(raw: dict) -> RefineConfig:
+    """解析 intrinsic.refine 段:开关(bool)+ 方法白名单 + 迭代/容差校验。"""
+    cfg = RefineConfig()
+    section = _check_is_dict(raw.get("refine", {}), "intrinsic.refine")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("intrinsic.refine.enabled", enabled,
+              "必须是 true 或 false(OpenCV 初值之后是否做 scipy 联合精化)")
+
+    method = section.get("method", cfg.method)
+    if method not in _ALLOWED_REFINE_METHODS:
+        _fail("intrinsic.refine.method", method,
+              f"只能是 {' 或 '.join(sorted(_ALLOWED_REFINE_METHODS))}"
+              f"('lm' 只支持稠密雅可比,本工程走稀疏路径,直接拒收防呆)")
+
+    max_nfev = section.get("max_nfev", cfg.max_nfev)
+    if not isinstance(max_nfev, int) or isinstance(max_nfev, bool) or max_nfev < 1:
+        _fail("intrinsic.refine.max_nfev", max_nfev, "必须是 >= 1 的整数(精化函数求值次数上限)")
+
+    ftol = section.get("ftol", cfg.ftol)
+    if not isinstance(ftol, int | float) or isinstance(ftol, bool) or ftol <= 0:
+        _fail("intrinsic.refine.ftol", ftol, "必须是 > 0 的数(代价函数相对收敛容差)")
+
+    xtol = section.get("xtol", cfg.xtol)
+    if not isinstance(xtol, int | float) or isinstance(xtol, bool) or xtol <= 0:
+        _fail("intrinsic.refine.xtol", xtol, "必须是 > 0 的数(参数相对收敛容差)")
+
+    gtol = section.get("gtol", cfg.gtol)
+    if not isinstance(gtol, int | float) or isinstance(gtol, bool) or gtol <= 0:
+        _fail("intrinsic.refine.gtol", gtol, "必须是 > 0 的数(梯度无穷范数收敛容差)")
+
+    return RefineConfig(enabled=enabled, method=method, max_nfev=max_nfev,
+                        ftol=float(ftol), xtol=float(xtol), gtol=float(gtol))
+
+
+def _parse_outlier(raw: dict) -> OutlierConfig:
+    """解析 intrinsic.outlier 段:开关(bool)+ 阈值/保险丝/视图下限校验。"""
+    cfg = OutlierConfig()
+    section = _check_is_dict(raw.get("outlier", {}), "intrinsic.outlier")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("intrinsic.outlier.enabled", enabled,
+              "必须是 true 或 false(是否自动剔除离群帧后重标定)")
+
+    rms_multiplier = section.get("rms_multiplier", cfg.rms_multiplier)
+    if (not isinstance(rms_multiplier, int | float) or isinstance(rms_multiplier, bool)
+            or rms_multiplier <= 1.0):
+        _fail("intrinsic.outlier.rms_multiplier", rms_multiplier,
+              "必须是 > 1.0 的数(逐帧 RMS > k×幸存集中位数判离群;k<=1 无判别力)")
+
+    max_drop_fraction = section.get("max_drop_fraction", cfg.max_drop_fraction)
+    if (not isinstance(max_drop_fraction, int | float) or isinstance(max_drop_fraction, bool)
+            or not 0 < max_drop_fraction < 1):
+        _fail("intrinsic.outlier.max_drop_fraction", max_drop_fraction,
+              "必须是 0 到 1 之间(不含端点)的小数(累计剔除比例保险丝)")
+
+    max_iterations = section.get("max_iterations", cfg.max_iterations)
+    if (not isinstance(max_iterations, int) or isinstance(max_iterations, bool)
+            or max_iterations < 1):
+        _fail("intrinsic.outlier.max_iterations", max_iterations,
+              "必须是 >= 1 的整数(剔除-重标定循环轮数上限)")
+
+    min_views = section.get("min_views", cfg.min_views)
+    if not isinstance(min_views, int) or isinstance(min_views, bool) or min_views < 2:
+        _fail("intrinsic.outlier.min_views", min_views,
+              "必须是 >= 2 的整数(剔除后幸存视图数下限;两三个视角定不了内参)")
+
+    return OutlierConfig(enabled=enabled, rms_multiplier=float(rms_multiplier),
+                         max_drop_fraction=float(max_drop_fraction),
+                         max_iterations=max_iterations, min_views=min_views)
+
+
+def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
+    """解析 intrinsic 段(模块2 全部算法参数/开关,CLI 零算法参数)。"""
+    section = _check_is_dict(raw.get("intrinsic", {}), "intrinsic")
+
+    rms_test_max = section.get("rms_test_max", IntrinsicConfig.rms_test_max)
+    if (not isinstance(rms_test_max, int | float) or isinstance(rms_test_max, bool)
+            or rms_test_max <= 0):
+        _fail("intrinsic.rms_test_max", rms_test_max,
+              "必须是 > 0 的数(test 集整体 RMS 判 PASS/FAIL 的阈值,像素)")
+
+    exclude = section.get("exclude_images", IntrinsicConfig.exclude_images)
+    if not isinstance(exclude, (list, tuple)) or not all(isinstance(x, str) for x in exclude):
+        _fail("intrinsic.exclude_images", exclude,
+              "必须是一列图像编号文字(如 [20261023_154025_519359_cam1]),逐项手动逻辑剔除")
+
+    return IntrinsicConfig(refine=_parse_refine(section), outlier=_parse_outlier(section),
+                           rms_test_max=float(rms_test_max), exclude_images=tuple(exclude))
+
+
 def _check_output_data_disjoint(cfg: StereoCalibConfig) -> None:
     """跨字段数据安全校验(CLAUDE.md data 只读 + INFRA-03 前置防线)。
 
@@ -292,8 +435,10 @@ def load_config(path: Path | str) -> StereoCalibConfig:
         _fail("cv2_threads", cv2_threads, "必须是整数(OpenCV 内部线程数,0 = 关闭)")
 
     preprocess = _parse_preprocess(raw)
+    intrinsic = _parse_intrinsic(raw)
 
     cfg = StereoCalibConfig(board=board, data=data, output_root=output_root,
-                            cv2_threads=cv2_threads, preprocess=preprocess)
+                            cv2_threads=cv2_threads, preprocess=preprocess,
+                            intrinsic=intrinsic)
     _check_output_data_disjoint(cfg)
     return cfg
