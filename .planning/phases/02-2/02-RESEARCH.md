@@ -535,7 +535,9 @@ def intrinsic() -> None:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> 全部问题已在规划阶段裁决:OQ1 → 中位数乘数(rms_multiplier=5.0,02-03 落地);OQ2 → loss 固定 "linear" 写死(02-02 落地);OQ3 → imread 首帧派生 + 首/中/末 3 帧抽查(02-01 落地);OQ4 → 单份 report.md + 每路 per_frame CSV(02-03 落地);OQ5 → 属 Phase 3 范围,Phase 3 规划时修正 STATE 真值数字。
 
 1. **离群剔除判据口径:中位数乘数 vs MAD 稳健 z 分数**
    - What we know: 参考工程两套惯例并存——存疑帧判定用 MAD z ≥ 3.5(ingest 段),人工剔除用 exclude_images 清单;本工程需要自动机制。
