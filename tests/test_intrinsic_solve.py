@@ -12,13 +12,26 @@ docstring/注释里复述——本文件的注释措辞刻意避开那些串。
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 
 import cv2
 import numpy as np
 import pytest
+from scipy.optimize._numdiff import approx_derivative
 
 from stereo_calib.intrinsic import models
-from stereo_calib.intrinsic.solve import SolveResult, solve_opencv
+from stereo_calib.intrinsic.metrics import compute_metrics
+from stereo_calib.intrinsic.solve import (
+    SolveResult,
+    make_jacobian_fn,
+    make_residual_fn,
+    pack_theta,
+    row_index,
+    solve_calibration,
+    solve_opencv,
+    unpack_theta,
+)
+from stereo_calib.io.config import RefineConfig
 
 # 合成真值参数(量级取自本数据实测锚点:焦距 ~1850、主点画面中心、强径向畸变)
 _PARAMS_TRUE = np.array([1850.0, 1840.0, 1280.0, 720.0, -0.40, 0.23, 1.1e-4, -3.8e-5, -0.08])
@@ -114,3 +127,111 @@ def test_solve_opencv_rejects_bad_shapes_and_too_few_views():
         solve_opencv(uvs[:, :, :1], objp, _IMAGE_SIZE)
     with pytest.raises(ValueError, match="视图"):
         solve_opencv(uvs[:1], objp, _IMAGE_SIZE)
+
+
+# ---------- 3. scipy 精化:真值恢复(1e-3 口径)/ 不劣化 / 实用收敛 ----------
+
+def test_solve_calibration_refine_recovers_truth_to_sub_pixel():
+    """12 视图合成真值 → 精化后 fx 相对误差 < 1e-3,回代 RMS < 0.2px。
+
+    同一把尺对账:scipy 解的 float64 回代 RMS 不得超过 OpenCV 初值解
+    + 1e-6(精化不劣化;残差同构,代价单调不增保证这一点)。
+    """
+    objp = _object_points()
+    uvs = _synthetic_views()
+    result = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig())
+
+    assert result.solver == "scipy"
+    fx_rel = abs(result.params[0] - _PARAMS_TRUE[0]) / _PARAMS_TRUE[0]
+    assert fx_rel < 1e-3, f"精化后 fx 相对误差 {fx_rel:.3e}(须 < 1e-3)"
+
+    m = compute_metrics(objp, uvs, result.params, result.rvecs, result.tvecs)
+    assert m.rms_overall < 0.2, f"精化后回代 RMS {m.rms_overall:.4f}px(须 < 0.2)"
+
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE)
+    m_init = compute_metrics(objp, uvs, init.params, init.rvecs, init.tvecs)
+    assert m.rms_overall <= m_init.rms_overall + 1e-6, (
+        f"精化 RMS {m.rms_overall:.6f} 劣于初值 {m_init.rms_overall:.6f}(精化不劣化)")
+
+    for key in ("status", "nfev", "final_cost", "tail_improvement", "converged", "opencv_rms"):
+        assert key in result.solver_meta, f"solver_meta 缺 {key}(判定依据不静默)"
+    assert result.solver_meta["converged"] is True
+
+
+def test_refine_disabled_returns_initial_solution():
+    """精化开关(配置控制):enabled=False → solver 如实标 opencv,结果等于初值解。"""
+    objp = _object_points()
+    uvs = _synthetic_views(n_views=6)
+    result = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig(enabled=False))
+    assert result.solver == "opencv"
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE)
+    assert np.array_equal(result.params, init.params)
+    assert np.array_equal(result.rvecs, init.rvecs)
+    assert np.array_equal(result.tvecs, init.tvecs)
+
+
+def test_row_index_contract_interleaves_uv():
+    """行序契约:第 view 视图第 point 角点的 u 残差住偶数行、v 住紧随奇数行。
+
+    残差与雅可比只准调这一个函数定行号,各自手算下标 = 梯度接错行,
+    不报错、只是收敛奇慢(静默失败防线)。
+    """
+    n_points = 88
+    assert row_index(0, 0, 0, n_points) == 0
+    assert row_index(0, 0, 1, n_points) == 1
+    assert row_index(0, 1, 0, n_points) == 2
+    assert row_index(0, 1, 1, n_points) == 3
+    assert row_index(1, 0, 0, n_points) == 2 * n_points
+    with pytest.raises(AssertionError, match="uv_axis"):
+        row_index(0, 0, 2, n_points)
+
+
+def test_pack_unpack_theta_roundtrip():
+    """θ 联合装箱 [9 内参 | 视图 i 的 (ω,t) 6 个] 与解箱互逆,坏长度当场报错。"""
+    objp = _object_points()
+    uvs = _synthetic_views(n_views=3)
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE)
+    theta = pack_theta(init.params, init.rvecs, init.tvecs)
+    assert theta.shape == (9 + 6 * 3,)
+    params, rvecs, tvecs = unpack_theta(theta)
+    assert np.array_equal(params, init.params)
+    assert np.array_equal(rvecs, init.rvecs)
+    assert np.array_equal(tvecs, init.tvecs)
+    with pytest.raises(AssertionError, match="θ 向量长度"):
+        unpack_theta(np.zeros(13))
+
+
+def test_analytic_sparse_jacobian_matches_numeric_full_theta():
+    """解析稀疏雅可比对 θ 全维数值差分逐项一致(相对差 < 1e-6,2 视图小场)。
+
+    这是行序错位的数值防线:残差按 row_index 契约交错排列,雅可比行序
+    一旦接错,数值差分比对立刻爆炸。
+    """
+    objp = _object_points()
+    uvs = _synthetic_views(n_views=2, seed=13)
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE)
+    theta0 = pack_theta(init.params, init.rvecs, init.tvecs)
+
+    jac_num = approx_derivative(make_residual_fn(objp, uvs), theta0.copy(), method="3-point")
+    jac_ana = make_jacobian_fn(objp, uvs)(theta0).toarray()
+    scale = max(float(np.abs(jac_num).max()), 1e-30)
+    rel = float(np.abs(jac_ana - jac_num).max()) / scale
+    assert rel < 1e-6, f"解析雅可比对 θ 全维数值差分相对差 {rel:.3e}(须 < 1e-6)"
+
+
+# ---------- 4. 源码防线:残差只经 models / Rodrigues 雅可比路线 / trf+lsmr 配置 ----------
+
+def test_solve_source_guard_models_only_math():
+    """solve.py 源文防线:无第二份投影/畸变公式;domega 走 Rodrigues 现成雅可比。
+
+    注意:被计数的串原文只在本文件与断言处出现,solve.py 的注释措辞
+    刻意避开它们(自伤规避体例)。
+    """
+    source = pathlib.Path("src/stereo_calib/intrinsic/solve.py").read_text(encoding="utf-8")
+    assert source.count("_distort") == 0, (
+        "solve.py 出现畸变核符号:投影/畸变公式只准经 intrinsic.models(单一数学源)")
+    assert "cv2.Rodrigues" in source, (
+        "solve.py 须声明 domega 雅可比来自 Rodrigues 第二返回值路线(严禁手写)")
+    assert 'tr_solver="lsmr"' in source and 'x_scale="jac"' in source, (
+        "scipy 精化必须走 trf + lsmr + x_scale=jac 的稀疏配置")
+    assert 'loss="linear"' in source, "loss 固定 linear(离群由 02-03 剔除机制处理)"
