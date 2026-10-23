@@ -184,6 +184,10 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
         dropped_frames / outlier_loop(剔除循环结束原因,含保险丝触发说明)/
         train_per_view_rms / test_per_view_rms(逐帧清单,NaN 表示失败帧)。
 
+    整路失败记录(编排层单路失败收口组装)只带 cam / failed=True / error
+    与中性空字段:指标表按 FAIL 渲染,失败留痕节写明病因,参数表只列
+    成功路——报告对失败路如实留痕,不编造指标。
+
     判定列按 rms_test_max 给 PASS/FAIL——只作报告结论,不作退出条件
     (OVERNIGHT AUTONOMY:跑完留痕,人不被夜里叫起来看退出码)。
     """
@@ -204,6 +208,10 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
     lines.append("| 相机 | train RMS (px) | test RMS (px) | test 阈值 (px) | 判定 | train 幸存帧数 | train 初始帧数 | test 帧数 |")
     lines.append("|---|---|---|---|---|---|---|---|")
     for s in per_cam_summaries:
+        if s.get("failed"):
+            lines.append(
+                f"| cam{s['cam']} | 失败 | 失败 | {rms_test_max} | FAIL | - | - | - |")
+            continue
         ok = np.isfinite(s["rms_test_overall"]) and s["rms_test_overall"] <= rms_test_max
         verdict = "PASS" if ok else "FAIL"
         lines.append(
@@ -212,19 +220,35 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
             f"{s['n_views_train']} | {s['n_views_train_initial']} | {s['n_views_test']} |")
     lines.append("")
 
-    # ---- 内参参数表:两路 9 参数按名 ----
+    # ---- 失败留痕:整路失败如实记录(其余路不受影响)----
+    failed_cams = [s for s in per_cam_summaries if s.get("failed")]
+    if failed_cams:
+        lines.append("## 失败留痕")
+        lines.append("")
+        lines.append("以下相机整路失败(其余路不受影响,产物已正常落盘):")
+        lines.append("")
+        for s in failed_cams:
+            lines.append(f"- cam{s['cam']}:{s['error']}")
+        lines.append("")
+
+    # ---- 内参参数表:成功路 9 参数按名 ----
+    ok_cams = [s for s in per_cam_summaries if not s.get("failed")]
     lines.append("## 内参参数(按名)")
     lines.append("")
-    lines.append("| 参数 | " + " | ".join(f"cam{s['cam']}" for s in per_cam_summaries) + " |")
-    lines.append("|---" * (len(per_cam_summaries) + 1) + "|")
-    for name in INTRINSIC_NAMES:
-        cells = " | ".join(f"{s['params'][name]:.6g}" for s in per_cam_summaries)
-        lines.append(f"| {name} | {cells} |")
-    lines.append("")
-    lines.append("求解器与开关:" + ";".join(
-        f"cam{s['cam']} solver={s['solver']}(refine={'开' if s['refine_enabled'] else '关'})"
-        for s in per_cam_summaries))
-    lines.append("")
+    if not ok_cams:
+        lines.append("本批无成功标定的相机,无内参参数可列。")
+        lines.append("")
+    else:
+        lines.append("| 参数 | " + " | ".join(f"cam{s['cam']}" for s in ok_cams) + " |")
+        lines.append("|---" * (len(ok_cams) + 1) + "|")
+        for name in INTRINSIC_NAMES:
+            cells = " | ".join(f"{s['params'][name]:.6g}" for s in ok_cams)
+            lines.append(f"| {name} | {cells} |")
+        lines.append("")
+        lines.append("求解器与开关:" + ";".join(
+            f"cam{s['cam']} solver={s['solver']}(refine={'开' if s['refine_enabled'] else '关'})"
+            for s in ok_cams))
+        lines.append("")
 
     # ---- 离群帧表:自动剔除留痕(可审计,T-02-08)----
     lines.append("## 离群帧(自动剔除留痕)")

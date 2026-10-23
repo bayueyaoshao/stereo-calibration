@@ -111,7 +111,10 @@ def score_pose_only(uv, objp, params) -> PoseScore:
         residuals = np.asarray(sol.fun, dtype=np.float64).reshape(-1, 2)
         rms = float(np.sqrt(np.mean(np.sum(residuals * residuals, axis=1))))
         return PoseScore(rms=rms, residuals=residuals, note="")
-    except (ValueError, ArithmeticError, RuntimeError, cv2.error) as e:
+    except (ValueError, ArithmeticError, RuntimeError, AssertionError, cv2.error) as e:
         # 数值路径的失败(np.linalg.LinAlgError 是 ValueError 子类,一并覆盖)
-        # 收口成单帧失败记录;形状/参数错误已在入口防线拦下,不吞代码契约。
+        # 收口成单帧失败记录;AssertionError 覆盖 models.project 的 Z>0 数据
+        # 防卫——精化期位姿由优化器控制,一个试验步就可能把板点挪到相机身后,
+        # 该断言依赖数据、入口防线拦不住,必须在此收口(形状/参数契约仍在
+        # 入口防线拦下,不受影响,不吞代码契约)。
         return _failure(f"只估位姿求解失败:{type(e).__name__}——{e}")

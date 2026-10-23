@@ -361,10 +361,11 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
     解析稀疏雅可比联合优化;不做内参/外参分块交替优化(Don't Hand-Roll)。
 
     失败契约:非收敛**不抛异常**——判定依据全进 solver_meta(T-02-05
-    不静默),由编排层消费 converged 标志决定后续;数值路径异常(ValueError
-    /ArithmeticError/RuntimeError,含线性代数炸掉)同样不向上抛?——抛。
-    本层是引擎而非实验网格:病态输入在入口防线已拦,数值异常如实上抛
-    交编排层中文收口(02-03),不吞成静默垃圾解。
+    不静默),由编排层消费 converged 标志决定后续;数值路径异常
+    (ValueError/ArithmeticError/RuntimeError/AssertionError,含线性代数
+    炸掉与 models.project 的 Z>0 数据防卫)如实上抛,由编排层 run_intrinsic
+    收口为该路失败记录、CLI 收口为中文一句(两层收口真实存在),不吞成
+    静默垃圾解。
 
     参数:
         uvs / objp / image_size:与 solve_opencv 同一口径;
