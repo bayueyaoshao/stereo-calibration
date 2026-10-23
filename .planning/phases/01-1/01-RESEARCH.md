@@ -104,7 +104,7 @@ None — discussion stayed within phase scope
 
 ### Alternatives Considered
 | Instead of | Could Use | Tradeoff |
-|------------|-----------|----------|
+|------------|-----------|-----------|
 | joblib loky | stdlib `multiprocessing.Pool` | Pool 更零依赖,但丢掉参考工程已踩平的三件事:异常信封(任一任务抛异常 joblib 会关整条结果流)、生成器式进度、`inner_max_num_threads` 防多进程叠满线程互抢内存带宽——建议直接移植 parallel.py 模式 |
 | matplotlib 可视化 | (不用) | Phase 1 角点标注用 `cv2.drawChessboardCorners` 一次成图,比 matplotlib 快且标准;不引入 |
 | findChessboardSBWithNovelAreas | findChessboardCornersSB | NovelAreas 变体服务"棋盘出画检测",本项目不需要 |
@@ -149,7 +149,7 @@ slopcheck 0.6.1 已安装并运行:`slopcheck install opencv-python numpy scipy 
                             ▼
         ┌───────── stereo-calib preprocess <config路径> ─────────┐
         │                    typer CLI(零算法参数)               │
-        ▼                                                     │
+        ▼                                                     ▼
   io/config.py 加载+校验(dataclass,中文报错)                     │
         ▼                                                     │
   io/dataset.py 扫描 data/{train,test}/<ts>/<ts>_<us>/cam{1,2}.jpg │
@@ -165,7 +165,7 @@ slopcheck 0.6.1 已安装并运行:`slopcheck install opencv-python numpy scipy 
                       │        →必要时窗口阶梯重提)             │ │
                       ▼失败                                    │ │
                  None(该帧记 fail)                             │ │
-  └───────┴───────┴───────┴──────────────────────────────────┘ │
+  └───────┴───────┴───────┴────────────────────────────────────┘ │
         ▼  (异常装 TaskFailed 信封,不杀任务流)                  │
   结果汇总(主进程)                                              │
   ├─► 按 {train,test} × {cam1,cam2} 组装                       │
@@ -236,7 +236,7 @@ found, raw = cv2.findChessboardCorners(gray, (cols, rows), _classic_flag_value(c
 ```
 
 ### Pattern 3: 缺陷闸门 + 窗口阶梯重提
-**What:** classic 精化后数两类硬伤——重复点(相邻间距 < 0.25×中位方格)与锯齿(间距二阶差分 > 0.3×中位方格);有缺陷则**从粗定位网格**(整数精度但次序可靠)出发,用阶梯窗口 `cap → cap-2 → … → 3`(cap 按间距 2% 分位同一公式推导)逐级重提,第一个零缺陷的胜出;恢复过程(缺陷数/试过的窗口/最终窗口)全部记入返回值留痕。重提用更严收敛判据(max_iter=100, eps=1e-6)。
+**What:** classic 精化后数两类硬伤——重复点(相邻间距 < 0.25×中位方格)与锯齿(间距二阶差分 > 0.3×中位方格);有缺陷则**从粗定位网格**(整数精度但次序可靠)出发,用阶梯窗口 `cap → cap-2 → … → 3`(cap 按间距 2% 分位同一公式推导)逐级用更严收敛判据重提,第一个零缺陷的胜出;恢复过程(缺陷数/试过的窗口/最终窗口)全部记入返回值留痕。重提用更严收敛判据(max_iter=100, eps=1e-6)。
 **When to use:** 每帧 classic 精化后无条件过闸门;正常帧零缺陷原样通过(逐字节不动)。
 **Empirical note:** 本数据方格约 44px(实测),远大于参考事故帧的临界情形,预计极少触发;但闸门必须移植——它是唯一能拦截"窗口吞邻角"类不可见偏差的运行时防线。 [VERIFIED: 本机实测 sq_px=43.9px]
 
@@ -440,15 +440,15 @@ cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
 
 ## Open Questions
 
-1. **CLI 命令名与包名定稿**
+1. **CLI 命令名与包名定稿 — (RESOLVED)**
    - What we know: CONTEXT D-09 示例 `stereo-calib`;Python 包名不能带连字符,需 `stereo_calib`。
-   - What's unclear: 命令名最终取 `stereo-calib` 还是其他。
-   - Recommendation: 按 CONTEXT 示例用 `stereo-calib`,包名 `stereo_calib`,planner 直接定案即可(低风险)。
+   - What's unclear: ~~命令名最终取 `stereo-calib` 还是其他。~~ 已定案,见下。
+   - **RESOLVED(2026-10-23,planner 定案并锁入 01-01-PLAN):** 命令名 `stereo-calib`(pyproject `[project.scripts]` `stereo-calib = "stereo_calib.cli.main:main"`),包名 `stereo_calib`。
 
-2. **npz 是否包含未检出图像行**
+2. **npz 是否包含未检出图像行 — (RESOLVED)**
    - What we know: 参考工程带掩码稠密格式(全图占行 + detected 掩码);D-04 只说"内含四类数组"。
-   - What's unclear: Phase 2 消费方(尚未实现)期望检出子集还是掩码。
-   - Recommendation: 用带掩码稠密格式(与参考一致、行对齐 CSV、下游 `detected` 过滤一行代码);planner 可在 PLAN 中把该选择记为 schema 契约。
+   - What's unclear: ~~Phase 2 消费方(尚未实现)期望检出子集还是掩码。~~ 已定案,见下。
+   - **RESOLVED(2026-10-23,planner 定案并锁入 01-01-PLAN):** 采用带掩码稠密格式——每 (cam, split) 一个 `cam{n}_{split}.npz`,八数组契约 `image_ids/paths/uv/objp/source/detected/sq_px/win_size`,未检出整行 NaN + `detected=False` + `source=""`;下游按 `detected` 过滤即得检出子集。该 schema 即 Phase 2/3 模块间契约,后续计划只增加内容(如 source 列出现 "classic"),不改 schema。
 
 ## Environment Availability
 
@@ -472,7 +472,7 @@ ASVS Level 1;离线批处理 CLI,无网络服务、无认证、无会话、无�
 
 | ASVS Category | Applies | Standard Control |
 |---------------|---------|-----------------|
-| V2 Authentication | no | 离线单用户工具 |
+4 | V2 Authentication | no | 离线单用户工具 |
 | V3 Session Management | no | 无会话 |
 | V4 Access Control | no | 无多用户 |
 | V5 Input Validation | yes | 配置层 dataclass 校验(非法值中文报错);图像路径白名单化扫描(只认 `cam*.jpg`);image_id 安全字符模式(参考 `_SAFE_IMAGE_ID` 正则,防特殊字符把产物写出 output/ 之外)——建议移植 |
