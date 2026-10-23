@@ -57,7 +57,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — 配置段 + M2 数学单一源(models)+ npz 装载 + float64 指标尺(INTR-01/03)
+- [x] 02-01-PLAN.md — 配置段 + M2 数学单一源(models)+ npz 装载 + float64 指标尺(INTR-01/03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -91,7 +91,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
-| 2. 模块2 内参标定 | 0/4 | Not started | - |
+| 2. 模块2 内参标定 | 1/4 | In Progress|  |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
 ---
