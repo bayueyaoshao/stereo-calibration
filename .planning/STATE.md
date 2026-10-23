@@ -67,12 +67,13 @@ Plan: 1 of 4
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261023-wp3 | 修复 phase 1 code review 三个高价值发现(CR-01 分组键、WR-01 窗口阶梯、WR-02 失败标签) | 2026-10-23 | de3daae | [261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02](./quick/261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02/) |
+| 261024-cr02 | 修复 phase 2 code review CR-01/WR-01/WR-02(异常收口三层防线、配置类型守卫、jac_sparsity 死代码),124 测试,生产重跑逐位复现 0.1407/0.1361 | 2026-10-24 | 8cd1231 | [261024-cr02-phase2-review-critical-warning](./quick/261024-cr02-phase2-review-critical-warning/) |
 
 ## Session Continuity
 
-- **Last action:** Completed quick task 261023-wp3: CR-01/WR-01/WR-02 fixes (2026-10-23)
-- **Next action:** `/gsd-plan-phase 2`
-- **Notes:** data/ 已存在(train 188 组 / test 15 组);granularity=coarse,mode=yolo;Phase 1 complete + 修复后预处理重跑计数不变(141/155/15/15,classic 9,公共对 112/15)
+- **Last action:** Phase 2 complete(内参 test RMS cam1 0.1407px / cam2 0.1361px,双路 PASS)+ quick 261024-cr02 修复收口 (2026-10-24)
+- **Next action:** `/gsd-plan-phase 3`
+- **Notes:** data/ 指纹 a183699d 全程不变;Phase 2 产物在 output/intrinsic/(intrinsics.json×2 + report.md + per_frame CSV×2);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2:剔除帧抽查、内参锚点评审)
 
 ---
 *Initialized 2026-10-23 during roadmap creation*
