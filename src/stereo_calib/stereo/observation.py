@@ -23,7 +23,9 @@ image_ids 里定位行,不命中即中文报错(Pitfall 10:对不齐 = 角点错
 另有 objp 三方 allclose 交叉核对(两路各自与配置重建网格、两路互相;
 Pitfall 11:board 规格漂移 → 角点与物点错位)与路径交叉核对(csv 的
 cam{n}_path 与 npz paths 对应行一致,连接键错位防线),不一致中文报错
-提示重跑 preprocess。
+提示重跑 preprocess;装载前先核对 pairs CSV 五列表头齐全(WR-02:列名级
+损坏——缺列/空文件/表头丢失——收口中文 ValueError,不以 KeyError 击穿
+CLI 异常网)。
 
 行序锁(Pitfall 10):image_ids 元组在装载时定死,幸存对顺序与 pairs CSV
 行序一一对应;后续 rvecs/tvecs/逐帧 RMS/报告/剔除清单全部按该顺序,绝不
@@ -51,6 +53,10 @@ _REQUIRED_KEYS = ("image_ids", "paths", "uv", "objp", "source", "detected")
 
 # Phase 2 intrinsics.json 15 字段里装载层消费的子集(其余是 Phase 2 留痕)
 _REQUIRED_JSON_FIELDS = ("cam", "image_size", "params", "K", "D")
+
+# Phase 1 对清单五列契约(表头核对用;WR-02:列名级损坏收口中文 ValueError)
+_REQUIRED_PAIR_COLS = ("group_id", "cam1_path", "cam2_path",
+                       "route_cam1", "route_cam2")
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,18 @@ def load_pairs(board: BoardSpec, pairs_csv: Path | str,
     # utf-8-sig:Phase 1 写盘带 BOM,裸 utf-8 会让首列 fieldnames 带 BOM 前缀
     with open(pairs_csv, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
+        # 表头核对(WR-02):列名级损坏(手编辑缺列/截断成空文件/表头行
+        # 丢失后数据行被当表头)在 DictReader 里以 KeyError 形态击穿 CLI
+        # 异常网吐英文堆栈——装载前先核对五列契约齐全,缺列中文报错(体例
+        # 同下方连接键/路径核对防线);值缺失的短行不在本防线拦,仍走既有
+        # 连接键/路径核对中文防线。
+        missing_cols = [col for col in _REQUIRED_PAIR_COLS
+                        if reader.fieldnames is None or col not in reader.fieldnames]
+        if missing_cols:
+            raise ValueError(
+                f"对清单 {Path(pairs_csv).name} 不合法:缺列 {missing_cols}"
+                f"(实际表头 {reader.fieldnames})——它不是 Phase 1 对清单契约"
+                f"的产物,请重跑 preprocess。")
         for lineno, row in enumerate(reader, start=2):  # start=2:第 1 行是表头
             gid = str(row["group_id"]).strip()
             if gid in exclude:

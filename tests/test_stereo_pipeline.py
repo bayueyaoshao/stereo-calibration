@@ -140,6 +140,32 @@ def test_load_pairs_min_pairs_underflow_raises(tmp_path):
                    min_pairs=100)
 
 
+@pytest.mark.parametrize("tamper", ["missing_cols", "empty_file", "headerless"])
+def test_load_pairs_corrupt_header_raises_chinese(tmp_path, tamper):
+    """WR-02 回归:pairs CSV 列名级损坏 → 中文 ValueError 收口(在 CLI 六类
+    异常网内),不再以 KeyError 击穿异常网吐英文堆栈。三种形态:手编辑缺列
+    (DictReader 按行抛 KeyError)/ 截断成空文件(表头全丢)/ 表头行丢失
+    (数据行被当表头,五列名全不命中)。值缺失的短行不在本防线拦——仍走
+    既有连接键/路径核对中文防线。"""
+    _synth, csv_path, split_dir = _build_tree(tmp_path, n_pairs=8)
+    if tamper == "missing_cols":
+        csv_path.write_text(
+            "group_id,cam1_path\n"
+            "20261024_000000_000000,data/train/x/cam1.jpg\n",
+            encoding="utf-8-sig")
+    elif tamper == "empty_file":
+        csv_path.write_text("", encoding="utf-8-sig")
+    else:  # headerless:表头行被截掉,首条数据行被 DictReader 当表头
+        csv_path.write_text(
+            "20261024_000000_000000,data/train/x/cam1.jpg,"
+            "data/train/x/cam2.jpg,sb,sb\n",
+            encoding="utf-8-sig")
+    with pytest.raises(ValueError, match="缺列"):
+        load_pairs(_CFG, csv_path,
+                   split_dir / "cam1_train.npz", split_dir / "cam2_train.npz",
+                   min_pairs=2)
+
+
 # ---------- select_pairs:相对行序子集重建 ----------
 
 
