@@ -140,6 +140,21 @@ _RECOVERY_MAX_ITER = 100
 _RECOVERY_EPSILON = 1e-6
 
 
+def _window_ladder(cap: int) -> list[int]:
+    """恢复重提的窗口阶梯:从 cap 往下每级减 2,并保证下限 3 恒在阶梯里。
+
+    偶数 cap 时 range(cap, 2, -2) 不含 3(例:cap=4 → [4]、cap=6 → [6, 4]),
+    必须补上——「下限 3 恒在阶梯里」是 _recover_grid_defects 尾部 assert 的
+    前提,漏 3 就是文档化不变量「往下每级减 2 试到 3」被击穿(WR-01)。
+    cap 由 max(3, ...) 保证 >= 3,阶梯绝不为空;奇数 cap 输出与原实现
+    逐字节一致(例:cap=11 → [11, 9, 7, 5, 3])。
+    """
+    ladder = list(range(cap, 2, -2))
+    if ladder[-1] != 3:
+        ladder.append(3)
+    return ladder
+
+
 def _recover_grid_defects(gray: np.ndarray, raw_corners: np.ndarray,
                           cols: int, rows: int) -> tuple[np.ndarray, int, dict, list[int]]:
     """窗口阶梯恢复:初次精化有缺陷时,从粗定位网格换更小的窗口逐级重提。
@@ -159,7 +174,7 @@ def _recover_grid_defects(gray: np.ndarray, raw_corners: np.ndarray,
     raw = np.asarray(raw_corners, dtype=np.float64)
     pool = _spacing_pool(raw, cols, rows)
     cap = max(3, int(np.percentile(pool, 2) // 2) - 1)
-    ladder = list(range(cap, 2, -2))  # 例:cap=11 → [11, 9, 7, 5, 3]
+    ladder = _window_ladder(cap)  # 例:cap=11 → [11, 9, 7, 5, 3](下限 3 恒在阶梯里)
     best: tuple[np.ndarray, int, dict] | None = None
     for w in ladder:
         cand = _subpix_refine(gray, raw.copy(), w,
