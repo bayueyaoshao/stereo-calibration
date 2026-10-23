@@ -65,7 +65,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-03-PLAN.md — 编排与产物:离群自动剔除(留痕)+ intrinsics.json/报告/CSV + 合成 e2e 契约(INTR-01/02/03/04)
+- [x] 02-03-PLAN.md — 编排与产物:离群自动剔除(留痕)+ intrinsics.json/报告/CSV + 合成 e2e 契约(INTR-01/02/03/04)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -91,7 +91,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
-| 2. 模块2 内参标定 | 2/4 | In Progress|  |
+| 2. 模块2 内参标定 | 3/4 | In Progress|  |
 | 3. 模块3 双目标定 | 0/? | Not started | - |
 
 ---
