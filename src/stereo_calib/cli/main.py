@@ -31,7 +31,9 @@ _config_path = Path("config.yaml")
 
 @app.callback()
 def _setup_runtime(
-    config: Path = typer.Option(
+    # typer 的声明式选项必须写在参数默认值里(其官方文档对 B008 的既定豁免);
+    # Phase 1 遗留告警,02-04 触达本文件时顺手消音(不改任何行为)
+    config: Path = typer.Option(  # noqa: B008
         Path("config.yaml"),
         "--config", "-c",
         help="配置文件路径,默认 config.yaml(唯一命令行选项,算法参数一律在配置文件里改)。",
@@ -72,10 +74,21 @@ def preprocess() -> None:
         raise typer.Exit(code=1) from e
 
 
-@app.command(help="模块2 单相机内参标定(后续阶段实现)")
+@app.command(help="模块2 单相机内参标定:消费 Phase 1 角点 npz → 两路相机分别 M2 标定"
+                  "(calibrateCameraExtended 初值,精化开关配置控制)→ train 离群自动剔除留痕"
+                  "→ test 集量化验证 → intrinsics.json + 报告落盘。")
 def intrinsic() -> None:
-    """模块2 占位。"""
-    _not_implemented("intrinsic")
+    """模块2 命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈。"""
+    try:
+        # 局部导入:让 --help / 占位命令不依赖 intrinsic 模块,加快启动
+        from stereo_calib.intrinsic.pipeline import run_intrinsic
+
+        run_intrinsic(load_config(_config_path))
+    except (ValueError, OSError) as e:
+        typer.echo(f"内参标定失败:{e}")
+        typer.echo("  请检查 config.yaml 配置与 Phase 1 产物(output/ 下的角点 npz),"
+                   "修正后重跑 stereo-calib intrinsic。")
+        raise typer.Exit(code=1) from e
 
 
 @app.command(help="模块3 双目外参标定(后续阶段实现)")

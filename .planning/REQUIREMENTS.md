@@ -18,10 +18,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### 模块2 — 内参标定 (INTR)
 
-- [ ] **INTR-01**: 用 train 集每路相机全部可用图像标定 M2 模型(fx,fy,cx,cy,k1,k2,p1,p2,k3):`cv2.calibrateCameraExtended` 初值 + scipy `least_squares` 精化
-- [ ] **INTR-02**: 输出两路相机内参文件(参数按名保存 + 图像分辨率)
-- [ ] **INTR-03**: 用 test 集角点计算每路相机整体重投影 RMS(float64 回代计算,不用 OpenCV 返回值)
-- [ ] **INTR-04**: 输出内参标定报告(逐帧误差 + 整体指标)
+- [x] **INTR-01**: 用 train 集每路相机全部可用图像标定 M2 模型(fx,fy,cx,cy,k1,k2,p1,p2,k3):`cv2.calibrateCameraExtended` 初值 + scipy `least_squares` 精化
+- [x] **INTR-02**: 输出两路相机内参文件(参数按名保存 + 图像分辨率)
+- [x] **INTR-03**: 用 test 集角点计算每路相机整体重投影 RMS(float64 回代计算,不用 OpenCV 返回值)
+- [x] **INTR-04**: 输出内参标定报告(逐帧误差 + 整体指标)
 
 ### 模块3 — 双目标定 (STER)
 
@@ -64,10 +64,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PREP-04 | Phase 1 | Complete (01-03) |
 | PREP-05 | Phase 1 | Complete |
 | PREP-06 | Phase 1 | Complete (01-03) |
-| INTR-01 | Phase 2 | Pending |
-| INTR-02 | Phase 2 | Pending |
-| INTR-03 | Phase 2 | Pending |
-| INTR-04 | Phase 2 | Pending |
+| INTR-01 | Phase 2 | Complete (02-02 引擎, 02-04 验收) |
+| INTR-02 | Phase 2 | Complete (02-03 契约, 02-04 验收) |
+| INTR-03 | Phase 2 | Complete (02-02 引擎, 02-04 验收) |
+| INTR-04 | Phase 2 | Complete (02-03 报告, 02-04 验收) |
 | STER-01 | Phase 3 | Pending |
 | STER-02 | Phase 3 | Pending |
 | STER-03 | Phase 3 | Pending |
@@ -84,4 +84,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-23 after 01-03 (PREP-04/PREP-06/INFRA-03 complete: 公共视场配对 + 全量可视化 + data 只读全量硬验证;注:PREP-01/03/05/INFRA-01/02 已由 01-01 落地但当时未勾选,留待 orchestrator/verifier 补记)*
+*Last updated: 2026-10-24 after 02-04 (INTR-01/02/03/04 complete: CLI 一条命令真实数据生产运行,两路 test RMS 0.1407/0.1361px < 1.0 判 PASS,产物/报告落盘 + data/ 只读指纹验证;前次 2026-10-23 after 01-03:PREP-04/PREP-06/INFRA-03 勾选,PREP-01/03/05/INFRA-01/02 由 01-01 落地补记)*

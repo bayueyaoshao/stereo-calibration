@@ -15,7 +15,9 @@ import pathlib
 import cv2
 import numpy as np
 import pytest
+import typer
 
+from stereo_calib.cli import main as cli_main
 from stereo_calib.intrinsic.artifacts import (
     write_extrinsics_npz,
     write_intrinsics_json,
@@ -676,3 +678,33 @@ def test_pipeline_and_artifacts_source_guards():
     artifacts_src = pathlib.Path("src/stereo_calib/intrinsic/artifacts.py").read_text(encoding="utf-8")
     for banned in ("_distort", "least_squares", "calibrateCameraExtended"):
         assert banned not in artifacts_src, f"落盘层不得出现 {banned}(落盘零数学)"
+
+
+# ===========================================================================
+# 02-04 任务 1:CLI intrinsic 子命令行为(真实入口,进程内直调)
+# ===========================================================================
+
+def test_cli_intrinsic_bad_input_chinese_exit_one(tmp_path, monkeypatch):
+    """坏环境(config 在而 Phase 1 角点 npz 缺失)→ CLI 收口为中文一句 +
+    typer.Exit code 1,坏输入绝不吐堆栈(照 preprocess 体例)。"""
+    (tmp_path / "config.yaml").write_text(_E2E_CONFIG_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_main, "_config_path", pathlib.Path("config.yaml"))
+    with pytest.raises(typer.Exit) as ei:
+        cli_main.intrinsic()
+    assert ei.value.exit_code == 1, "坏输入必须退出码 1(中文收口契约)"
+    assert not (tmp_path / "output" / "intrinsic").exists(), "失败运行不得留下半套产物"
+
+
+def test_cli_intrinsic_happy_path_end_to_end(tmp_path, monkeypatch, make_chessboard_image):
+    """正常合成环境:CLI 一条命令(仅 --config,零算法参数)端到端不抛,
+    五类产物齐全在位——真实命令入口锁定(02-03 e2e 夹具复用)。"""
+    _build_run_tree(tmp_path, make_chessboard_image)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_main, "_config_path", pathlib.Path("config.yaml"))
+    cli_main.intrinsic()  # 不抛即通过:中文收口层没有误伤正常路径
+    root = tmp_path / "output" / "intrinsic"
+    for cam in (1, 2):
+        assert (root / f"cam{cam}" / "intrinsics.json").is_file()
+        assert (root / f"per_frame_cam{cam}.csv").is_file()
+    assert (root / "report.md").is_file()
