@@ -8,7 +8,7 @@
 
 - [x] **Phase 1: 工程骨架 + 模块1 数据预处理** — 配置驱动工程骨架,角点检测/筛选/清单输出端到端可运行 (completed 2026-10-23)
 - [x] **Phase 2: 模块2 内参标定** — 两路相机 M2 内参标定 + test 集 RMS 验证 (completed 2026-10-23)
-- [ ] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证
+- [ ] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证(blocked 2026-10-24:SC3 生产验收 FAIL,test 距离残差 16.93mm ≫ 5mm;CLI/链路已就绪,根因为两路内参在双目精度下互不兼容,联合 BA gap-closure 进行中)
 
 ## Phase Details
 
@@ -100,7 +100,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 03-04-PLAN.md — CLI 一条命令 + 真实数据全量生产运行 + 四条成功标准验收(STER-01/02/03/04)
+- [x] 03-04-PLAN.md — CLI 一条命令 + 真实数据全量生产运行 + 四条成功标准验收(STER-01/02/03/04)〔已执行,结果 blocked:SC3 FAIL 16.93mm,REQUIREMENTS 未勾选,详见 03-04-SUMMARY〕
 
 ## Progress
 
@@ -108,7 +108,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 3/4 | In Progress|  |
+| 3. 模块3 双目标定 | 4/4 executed,03-04 blocked | Blocked — gap-closure 联合 BA |  |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*

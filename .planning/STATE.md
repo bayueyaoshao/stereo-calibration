@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-10-23T19:24:38.591Z"
+last_updated: "2026-10-23T22:34:39.758Z"
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 11
-  completed_plans: 7
-  percent: 64
+  completed_plans: 10
+  percent: 91
 ---
 
 # STATE: 双目相机标定生产工具
@@ -23,13 +23,13 @@ progress:
 
 ## Current Position
 
-Phase: 3 (模块3-双目标定) — EXECUTING
-Plan: 1 of 4
+Phase: 3 (模块3-双目标定) — BLOCKED(SC3 生产验收 FAIL,gap-closure 联合 BA 中)
+Plan: 4 of 4 executed
 
 - **Phase:** 3
-- **Plan:** Not started
-- **Status:** Executing Phase 3
-- **Progress:** ▢▢▢ 0/3 phases complete
+- **Plan:** 03-04(blocked)
+- **Status:** Phase 3 gap-closure
+- **Progress:** ▩▩▩▩ 10/11 plans(03-04 验收 FAIL:SC3 test 距离残差 16.93mm ≫ 5mm)
 
 ```
 [----------] 0%  Phase 1 of 3
@@ -41,8 +41,8 @@ Plan: 1 of 4
 |--------|--------|---------|
 | Requirements shipped | 17 | 0 |
 | Phases complete | 3 | 0 |
-| 内参 test RMS | < 1.0 px | — |
-| 双目距离残差 RMS | < 5 mm | — |
+| 内参 test RMS | < 1.0 px | cam1 0.1407 / cam2 0.1361 |
+| 双目距离残差 RMS | < 5 mm | 16.93(FAIL,SC3 生产实测)|
 
 ## Accumulated Context
 
@@ -60,7 +60,7 @@ Plan: 1 of 4
 
 ### Blockers
 
-- None
+- SC3 生产验收 FAIL:test 距离残差 16.93mm ≫ 5mm(03-04-SUMMARY 完整诊断)。根因:两路独立内参在双目精度下互不兼容(相对位姿逐对散布中位 2.5°/max 12.2°)+ 支架跨帧摆动;刚性外参+固定内参模型在本数据不可达。预案:联合 BA(内参+公共外参+逐对位姿同解),移植参考工程2 multibundle.py IntrinsicJointBA,先收敛性验证(03-02 实测全放开 120 轮不收敛)
 
 ### Quick Tasks Completed
 
@@ -71,9 +71,9 @@ Plan: 1 of 4
 
 ## Session Continuity
 
-- **Last action:** Phase 2 complete(内参 test RMS cam1 0.1407px / cam2 0.1361px,双路 PASS)+ quick 261024-cr02 修复收口 (2026-10-24)
-- **Next action:** `/gsd-plan-phase 3`
-- **Notes:** data/ 指纹 a183699d 全程不变;Phase 2 产物在 output/intrinsic/(intrinsics.json×2 + report.md + per_frame CSV×2);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2:剔除帧抽查、内参锚点评审)
+- **Last action:** Phase 3 wave 4(03-04)执行完毕:CLI stereo 子命令交付(194 测试绿),生产运行 SC3 裁决 FAIL(test 16.93mm),REQUIREMENTS 按失败协议未勾选 (2026-10-24)
+- **Next action:** 联合 BA gap-closure(03-05):先收敛性验证,过闸则勾 STER + phase complete;否则晨间报告如实交付诊断
+- **Notes:** data/ 指纹 a183699d 全程不变;output/stereo/ 为正式配置诚实失败留痕;晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2) + 03 届时按 verify 结果
 
 ---
 *Initialized 2026-10-23 during roadmap creation*
