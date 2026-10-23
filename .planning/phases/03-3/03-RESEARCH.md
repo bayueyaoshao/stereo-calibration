@@ -642,7 +642,11 @@ def residuals(self, params) -> np.ndarray:
 | A6 | test 15 对全部 sb 路线、train 仅 5 对含 classic(实测),混合角点进双目链路可接受(Phase 2 A5 同款逻辑) | Summary | 若 classic 系统差影响外参,报告 route 列已留痕,可配置过滤重跑 |
 | A7 | 精化规模(678 参数/39424 残差)数值雅可比分钟级、解析雅可比秒级的推算 | Pattern 4 | 只影响耗时不影响正确性;参考在更大规模(564 参数/64064 残差)实测可跑 |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> 全部问题已在规划阶段裁决:Q1 → 真值从 build_object_points 导出(305.16389039334257mm);Q2 → baseline 硬带 [20,2000]mm + 报告量级核对(Decision 5,用户可后续收窄);Q3 → 两遍法自洽锚(不依赖 Phase 2 位姿);Q4 → 不预排除,交双目自身 outlier 机制 + exclude_pairs 通道(03-01 context 定案)。
+
+1. **(已解决)真值距离数字** — √(10²+7²)×25 = **305.16389039334257mm** 本机复算核实(STATE.md 旧值 307.45 为算术误差,ROADMAP/STATE 已于 2026-10-24 修正)。**建议:** 真值从 `build_object_points` 导出,不写死数字。→ 已折入 Pattern 5。
 
 1. **(已解决)真值距离数字** — √(10²+7²)×25 = **305.16389039334257mm** 本机复算核实(STATE.md 旧值 307.45 为算术误差,ROADMAP/STATE 已于 2026-10-24 修正)。**建议:** 真值从 `build_object_points` 导出,不写死数字。→ 已折入 Pattern 5。
 2. **支架物理 baseline 是多少?** — What we know: 本仓无记载;参考 2 的 1208mm 是另一台 rig。What's unclear: 用户支架实际基线量级。Recommendation: 按 Decisions 5 的硬带 + 报告核对;若用户能提供,收窄带宽(A1)。
