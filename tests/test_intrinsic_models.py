@@ -181,3 +181,173 @@ def test_models_source_guard_single_math_source():
     # 裁剪声明:参考工程的多模型分支与模型注册机制不得回潮(本工程固定九参数模型)
     for token in ("M1", "M3", "register_model"):
         assert token not in source, f"models.py 出现被裁剪的参考工程痕迹:{token}"
+
+
+# ===========================================================================
+# M8(rational 8 畸变,12 参)双模型支持(quick 261024-rational8-production)
+# ===========================================================================
+
+# M8 温和量级(PLAN 测试规格:分子分母系数都在 1e-2 量级,可把点铺到高 r²)
+_PARAMS_M8 = np.array([2037.4, 2037.2, 1279.5, 719.6,
+                       0.10, -0.05, 0.001, -0.002, 0.01, 0.05, -0.02, 0.03])
+# M8 生产量级(本机数据 rational8 重拟合实测锚点,cam1)
+_PARAMS_M8_PROD = np.array([2037.4, 2037.2, 1279.5, 719.6,
+                            2.7411, -1.3171, 0.0002, -0.0000, -0.4289,
+                            3.5219, -0.0652, -1.4662])
+
+
+def _high_r2_points(rng: np.random.Generator, n: int = 64) -> np.ndarray:
+    """高归一化半径相机系点:深度 300–700,横向铺到 r² ≈ 0.2–1.2。"""
+    xy = rng.uniform(-1.1, 1.1, (n, 2))
+    z = rng.uniform(300.0, 700.0, n)
+    return np.column_stack([xy[:, 0] * z, xy[:, 1] * z, z])
+
+
+def test_m8_project_parity_with_cv2_project_points():
+    """M8 投影公式与 cv2.projectPoints 在高 r² 点上 parity < 1e-9 px。
+
+    布局(位置探针实证,OpenCV 4.14.0):D 前 8 = [k1,k2,p1,p2,k3,k4,k5,k6],
+    num 用下标 (0,1,4)、den 用下标 (5,6,7);切向加在 rational 缩放之外。
+    """
+    rng = np.random.default_rng(23)
+    pts = _high_r2_points(rng)
+    ours = models.project(pts, _PARAMS_M8)
+    ref, _ = cv2.projectPoints(pts.reshape(-1, 1, 3),
+                               np.zeros(3, dtype=np.float64),
+                               np.zeros(3, dtype=np.float64),
+                               models.intrinsics_matrix(_PARAMS_M8),
+                               _PARAMS_M8[4:])
+    ref = ref.reshape(-1, 2)
+    max_abs = float(np.abs(ours - ref).max())
+    assert max_abs < 1e-9, f"M8 投影对 cv2.projectPoints parity 偏差 {max_abs:.3e}px(须 < 1e-9)"
+
+
+def test_m8_project_parity_production_scale():
+    """M8 生产量级(实测锚点 |den−1|≈0.5)在工作域内 parity < 1e-9 px。"""
+    rng = np.random.default_rng(29)
+    # 工作域点:r² ≲ 0.5(真实棋盘角点范围,该畸变在此区间可逆且 den 远离 0)
+    xy = rng.uniform(-0.65, 0.65, (64, 2))
+    z = rng.uniform(400.0, 900.0, 64)
+    pts = np.column_stack([xy[:, 0] * z, xy[:, 1] * z, z])
+    ours = models.project(pts, _PARAMS_M8_PROD)
+    ref, _ = cv2.projectPoints(pts.reshape(-1, 1, 3),
+                               np.zeros(3, dtype=np.float64),
+                               np.zeros(3, dtype=np.float64),
+                               models.intrinsics_matrix(_PARAMS_M8_PROD),
+                               _PARAMS_M8_PROD[4:])
+    ref = ref.reshape(-1, 2)
+    max_abs = float(np.abs(ours - ref).max())
+    assert max_abs < 1e-9, f"M8 生产量级 parity 偏差 {max_abs:.3e}px(须 < 1e-9)"
+
+
+def test_m8_project_unproject_roundtrip():
+    """M8 project → unproject → project 往返最大偏差 < 1e-9 px(两种量级)。"""
+    for params in (_PARAMS_M8, _PARAMS_M8_PROD):
+        rng = np.random.default_rng(31)
+        pts = _high_r2_points(rng, n=48)
+        uv = models.project(pts, params)
+        rays = models.unproject(uv, params)
+        uv2 = models.project(rays, params)
+        max_abs = float(np.abs(uv - uv2).max())
+        assert max_abs < 1e-9, f"M8 往返偏差 {max_abs:.3e}px(须 < 1e-9;牛顿逆未收敛?)"
+
+
+def test_m8_jacobians_match_numeric():
+    """M8 project_jacobian 对 12 个内参列逐列对上数值差分(含 k4,k5,k6 列,< 1e-6)。"""
+    rng = np.random.default_rng(37)
+    pts = _high_r2_points(rng)
+
+    def f(p: np.ndarray) -> np.ndarray:
+        return models.project(pts, p).ravel()
+
+    jac_num = approx_derivative(f, _PARAMS_M8.copy(), method="3-point")
+    jac_ana = models.project_jacobian(pts, _PARAMS_M8).reshape(2 * len(pts), 12)
+    assert jac_ana.shape[1] == 12, "M8 雅可比必须是 12 列(k4,k5,k6 列不得缺失)"
+    # den 列(k4,k5,k6 = 参数下标 9,10,11)单列抽验:数值差分非平凡
+    scale = max(float(np.abs(jac_num[:, 9:]).max()), 1e-30)
+    assert scale > 0.0, "k4 列数值差分全零,点选得没有判别力"
+    rel = _max_rel_diff(jac_ana, jac_num)
+    assert rel < 1e-6, f"M8 投影雅可比对数值差分相对差 {rel:.3e}(须 < 1e-6)"
+
+
+def test_m8_point_jacobian_matches_numeric():
+    """M8 project_point_jacobian 对相机点 3 列逐列对上数值差分(< 1e-6)。"""
+    rng = np.random.default_rng(41)
+    pts = _high_r2_points(rng, n=32)
+
+    def f(x: np.ndarray) -> np.ndarray:
+        return models.project(x.reshape(-1, 3), _PARAMS_M8).ravel()
+
+    x0 = pts.ravel().copy()
+    jac_num = approx_derivative(f, x0, method="3-point")
+    blocks = models.project_point_jacobian(pts, _PARAMS_M8)
+    n = len(pts)
+    jac_ana = np.zeros((2 * n, 3 * n), dtype=np.float64)
+    for i in range(n):
+        jac_ana[2 * i:2 * i + 2, 3 * i:3 * i + 3] = blocks[i]
+    rel = _max_rel_diff(jac_ana, jac_num)
+    assert rel < 1e-6, f"M8 投影点雅可比对数值差分相对差 {rel:.3e}(须 < 1e-6)"
+
+
+def test_m2_is_m8_with_unit_denominator():
+    """M2 是 M8 的 den≡1 特例:9 参 M2 与 den 系数置零的 12 参 M8 逐位等价。
+
+    公式体只有一份的证据:M8 参数向量把 k4,k5,k6 置 0(参数下标 9,10,11)
+    后,投影、两个雅可比必须与 M2 同输入逐位一致(强断言 ==,非 allclose)。
+    """
+    rng = np.random.default_rng(43)
+    pts = _random_cam_points(rng)
+    params_m8 = np.concatenate([_PARAMS, [0.0, 0.0, 0.0]])
+    assert np.array_equal(models.project(pts, _PARAMS), models.project(pts, params_m8))
+    jac_m2 = models.project_jacobian(pts, _PARAMS)
+    jac_m8 = models.project_jacobian(pts, params_m8)
+    assert np.array_equal(jac_m2, jac_m8[:, :, :9]), "前 9 列(共享公式体)必须逐位一致"
+    # k4,k5,k6 是 M8 的新自由度:den≡1 处函数值相等,但对 den 系数的偏导
+    # 不为零(∂ratio/∂k_den_j = −num·r^(2j)/den²)——按解析式逐列校验
+    z = pts[:, 2]
+    x = pts[:, 0] / z
+    y = pts[:, 1] / z
+    r2 = x * x + y * y
+    r4 = r2 * r2
+    r6 = r4 * r2
+    num = 1.0 + _PARAMS[4] * r2 + _PARAMS[5] * r4 + _PARAMS[8] * r6
+    fx, fy = _PARAMS[0], _PARAMS[1]
+    for col, rpow in ((9, r2), (10, r4), (11, r6)):
+        assert np.allclose(jac_m8[:, 0, col], -fx * x * num * rpow, rtol=0, atol=1e-9)
+        assert np.allclose(jac_m8[:, 1, col], -fy * y * num * rpow, rtol=0, atol=1e-9)
+    assert np.array_equal(models.project_point_jacobian(pts, _PARAMS),
+                          models.project_point_jacobian(pts, params_m8))
+    uv = models.project(pts, _PARAMS)
+    assert np.array_equal(models.unproject(uv, _PARAMS), models.unproject(uv, params_m8))
+
+
+def test_intrinsic_names_layout_and_guard():
+    """intrinsic_names 唯一出口:M2→9 名、M8→12 名;别名常量仍是 M2 九名;
+    非法模型名中文 ValueError。"""
+    assert models.intrinsic_names("M2") == (
+        "fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3")
+    assert models.INTRINSIC_NAMES == models.intrinsic_names("M2"), "别名必须仍指 M2 九名"
+    assert models.intrinsic_names("M8") == (
+        "fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6")
+    with pytest.raises(ValueError, match="畸变模型名不合法"):
+        models.intrinsic_names("M16")
+
+
+def test_as_params_rejects_bad_length():
+    """参数向量 11 长(既非 9 也非 12)→ 中文 AssertionError 点名两种合法布局。"""
+    rng = np.random.default_rng(47)
+    pts = _random_cam_points(rng, n=4)
+    with pytest.raises(AssertionError, match="参数向量形状不合"):
+        models.project(pts, np.linspace(-0.1, 0.1, 11))
+
+
+def test_m8_den_near_zero_guard():
+    """den 极小(< 1e-6)→ 中文 AssertionError 防静默垃圾(除零前拦下)。
+
+    构造:den = 1 − 1.0·r² 在 r²=1 处取零;点精确落在 r²=1。
+    """
+    params = np.array([2037.4, 2037.2, 1279.5, 719.6,
+                       0.1, -0.05, 0.001, -0.002, 0.01, -1.0, 0.0, 0.0])
+    pts = np.array([[1.0, 0.0, 1.0], [0.5, 0.5, 1.0]])  # r² = 1.0 与 0.5
+    with pytest.raises(AssertionError, match="分母"):
+        models.project(pts, params)
