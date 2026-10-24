@@ -23,6 +23,8 @@ from stereo_calib.intrinsic import models
 from stereo_calib.intrinsic.metrics import compute_metrics
 from stereo_calib.intrinsic.solve import (
     SolveResult,
+    _solve_opencv_m8_pass2,
+    _unpack_opencv_solution,
     make_jacobian_fn,
     make_residual_fn,
     pack_theta,
@@ -297,6 +299,80 @@ def test_solve_calibration_m8_recovers_synthetic_truth():
     assert m.rms_overall < 0.2, f"M8 精化后回代 RMS {m.rms_overall:.4f}px(须 < 0.2)"
     assert result.solver_meta["converged"] is True, (
         f"实用收敛判定须为 True(meta={result.solver_meta})")
+
+
+def test_m8_two_pass_meta_records_both_pass_rms():
+    """M8 两遍拟合的 meta 契约(追加轮):两遍各自 cv RMS 不静默,对账键取定稿。
+
+    M2 路径零改动:meta 里绝不出现 pass1/pass2 键(单遍拟合的原状锁定)。
+    """
+    objp = _object_points(square_mm=40.0)
+    uvs = _synthetic_views_m8(n_views=6)
+    m8 = solve_opencv(uvs, objp, _IMAGE_SIZE, model="M8")
+    for key in ("opencv_rms_pass1", "opencv_rms_pass2"):
+        assert key in m8.solver_meta and m8.solver_meta[key] > 0.0, (
+            f"M8 solver_meta 缺 {key}:两遍各自 cv RMS 必须如实留痕(不静默)")
+    assert m8.solver_meta["opencv_rms"] == pytest.approx(m8.solver_meta["opencv_rms_pass2"]), (
+        "对账键 opencv_rms 须取第二遍(定稿解)口径,精化链留痕不断")
+    assert m8.solver_meta["pass2_flags_used"] == (
+        int(cv2.CALIB_RATIONAL_MODEL) | int(cv2.CALIB_USE_INTRINSIC_GUESS)), (
+        "第二遍 flags 必须 RATIONAL|USE_INTRINSIC_GUESS(guess 自再拟合)")
+
+    m2 = solve_opencv(_synthetic_views(n_views=6), _object_points(), _IMAGE_SIZE)
+    assert "opencv_rms_pass1" not in m2.solver_meta, "M2 单遍:不许出现两遍拟合键"
+    assert "opencv_rms_pass2" not in m2.solver_meta, "M2 单遍:不许出现两遍拟合键"
+    assert m2.solver_meta["flags_used"] == 0, "M2 flags=0 原状"
+
+
+def test_m8_pass2_washes_degenerate_valley_guess_into_good_basin():
+    """退化谷单测(追加轮核心):爆炸系数的 M8 解作 guess → 生产 pass2 拟合后
+    体检 A1/A3 口径转绿。
+
+    产线 cam2 实证病灶:fresh rational 初值落入 fx-D 简并谷(D 系数爆炸互相
+    抵消 [k2≈75,k5≈77,k6≈71]、fx 2034.88 偏离锚点 2037、残差带 A1=0.028px
+    ——局部极小,RMS 与好盆地相当,标量指标看不出)。修法 = 第二遍
+    RATIONAL|USE_INTRINSIC_GUESS 自再拟合(真实数据实测:cam2 从谷 guess 洗
+    回好盆地 fx 2037.53/A1 0.0011)。合成等价构造:直接以 cam2 谷形态的爆炸
+    系数解作 guess 驱动生产 pass2 助手,断言①fx 恢复 <0.5%、②D 大系数退场
+    (好盆地,不是谷)、③体检 verdict 可靠且 A1/A3 不红。
+    """
+    from stereo_calib.intrinsic.diagnostics import run_battery
+    from stereo_calib.io.config import IntrinsicDiagnosticsConfig
+
+    objp = _object_points(square_mm=40.0)
+    uvs = _synthetic_views_m8()
+    n_views = uvs.shape[0]
+    objs32 = [objp.astype(np.float32).reshape(-1, 1, 3) for _ in range(n_views)]
+    imgs32 = [uv.astype(np.float32).reshape(-1, 1, 2) for uv in uvs]
+
+    # 谷形态 guess:fx/fy 取 cam2 谷实测值(2034.88/2024.09,偏离本合成真值
+    # ~0.12%/0.64%)+ cam2 调试出的爆炸系数族(k2/k5 大且近、k3/k6 跟随)。
+    k_valley = models.intrinsics_matrix(_PARAMS_M8_TRUE).copy()
+    k_valley[0, 0] = 2034.88
+    k_valley[1, 1] = 2024.09
+    d_valley = np.array([1.78, 74.6, 1.0e-4, -1.0e-4, 23.9, 2.46, 76.5, 71.3])
+
+    rms2, K2, D2, rvecs2, tvecs2, flags2 = _solve_opencv_m8_pass2(
+        objs32, imgs32, _IMAGE_SIZE, k_valley, d_valley, int(cv2.CALIB_RATIONAL_MODEL))
+    assert flags2 == int(cv2.CALIB_RATIONAL_MODEL) | int(cv2.CALIB_USE_INTRINSIC_GUESS)
+    params2, _, _ = _unpack_opencv_solution(
+        "M8", models.intrinsic_names("M8"), K2, D2, rvecs2, tvecs2, n_views)
+    assert rms2 > 0.0
+
+    fx_rel = abs(params2[0] - _PARAMS_M8_TRUE[0]) / _PARAMS_M8_TRUE[0]
+    assert fx_rel < 5e-3, f"从谷 guess 出发 fx 未洗回真值邻域:相对误差 {fx_rel:.3e}(须 < 5e-3)"
+    assert float(np.abs(params2[4:]).max()) < 10.0, (
+        f"D 系数仍爆炸(max |k|={np.abs(params2[4:]).max():.1f})——没洗出简并谷,"
+        f"好盆地本合成场的系数量级 <10(真值 max 3.52)")
+
+    # 体检口径转绿:洗回解喂体检,A1/A3 不红、verdict 可靠(任务书口径)
+    cfg = IntrinsicDiagnosticsConfig(a3_min_frames=5)  # 20 视图切 6 片各 ~10 帧
+    report = run_battery(uvs, objp, models.intrinsics_matrix(params2),
+                         params2[4:], _IMAGE_SIZE, cfg)
+    by_name = {c.name: c for c in report.checks}
+    assert report.verdict == "可靠", f"洗回解体检须可靠(红灯 {report.red_names})"
+    assert by_name["A1"].red is False, f"A1 须转绿(值 {by_name['A1'].value})"
+    assert by_name["A3"].red is False, f"A3 须转绿(值 {by_name['A3'].value})"
 
 
 def test_pack_unpack_theta_m8_roundtrip():

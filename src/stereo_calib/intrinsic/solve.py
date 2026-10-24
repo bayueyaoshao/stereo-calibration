@@ -8,11 +8,21 @@ config 传入(2026-10-24 增补);算法与调用形态照搬参考工程已验�
 
 结构(单一数学源纪律,RESEARCH Pattern 1/3):
 - OpenCV 路径 solve_opencv:标定只当黑盒初始化器,float32 装包规则隔离
-  在本文件调用处(绑定层只收 32 位,进 64 位会当场拒收);
+  在本文件调用处(绑定层只收 32 位,进 64 位会当场拒收);M8 路径做
+  两遍拟合(见下,2026-10-24 追加轮,真实数据实证),M2 单遍不变;
 - scipy 路径 refine_scipy:theta 联合装箱 + 解析稀疏雅可比 + trf/lsmr;
   残差与雅可比只准 import intrinsic.models 的投影/变换函数,本文件不
   出现第二份投影或畸变公式(源码防线测试锁定);
 - 编排入口 solve_calibration:初值 →(配置开关)精化,02-03 唯一消费它。
+
+M8 两遍拟合(2026-10-24 追加轮):fresh rational 初值会偶发落入 fx-D 简并
+谷(产线 cam2 实证:D 系数爆炸互相抵消 [k2≈75,k5≈77,k6≈71],fx 2034.88
+偏离锚点 2037,残差带结构 A1=0.028px——局部极小、RMS 相当,标量指标看不
+出)。修法:第一遍现状拟合后,第二遍以 flags=RATIONAL|USE_INTRINSIC_GUESS、
+guess=第一遍 K/D 自再拟合——从退化谷 guess 出发确定性洗回好盆地(实测
+cam2 fx 2034.88→2037.53、体检 A1 0.028→0.0011;好盆地再拟合不变坏)。
+两遍各自的 cv RMS 进 solver_meta(opencv_rms_pass1/opencv_rms_pass2,
+不静默);对账键 opencv_rms 取第二遍(定稿解)口径,精化链留痕不断。
 
 指标口径(Pitfall 12):OpenCV 返回的整体 RMS 基于 float32 装包角点,
 与 float64 回代差约 1e-4 像素——只进 solver_meta["opencv_rms"] 留对账
@@ -94,13 +104,77 @@ def _check_common_inputs(uvs, objp, image_size) -> tuple[np.ndarray, np.ndarray,
     return uvs_arr, objp_arr, (int(size[0]), int(size[1]))
 
 
+def _unpack_opencv_solution(model: str, names, K, D, rvecs, tvecs,
+                            n_views: int) -> np.ndarray:
+    """OpenCV 解 → params (9,)/(12,) + 位姿 (V,3)×2,解包断言按模型。
+
+    OpenCV 把 D 装成 (1,n) 矩阵返回,先拉平:M2 恰 5 长
+    [k1,k2,p1,p2,k3];M8 实测(位置探针,cv2 4.14.0)在 rational flag 下
+    返回 14 长(s1..s4/τx,τy 槽位仅在对应 flag 下非零)——断言 len ≥ 8、
+    余位全零后取前 8([k1,k2,p1,p2,k3,k4,k5,k6])。两遍拟合复用同一解包
+    (单一解包纪律:断言只此一份,两遍解防不了布局陷阱等于没防)。
+    """
+    D = np.asarray(D, dtype=np.float64).ravel()
+    if model == "M2":
+        assert D.shape == (5,), (
+            f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (5,)(M2 布局 {names})。"
+            f"出现此错说明求解调用被改动,请对照参考工程核查。")
+    else:
+        assert D.shape[0] >= 8, (
+            f"OpenCV 解包的畸变向量长度是 {D.shape},M8 布局 {names} 至少要 8 长。"
+            f"出现此错说明 rational flag 未生效或求解调用被改动,请核查。")
+        if D.shape[0] > 8:
+            assert bool(np.allclose(D[8:], 0.0)), (
+                f"OpenCV 解包的畸变向量是 {D.shape[0]} 长,但第 8 位之后非全零"
+                f"({D[8:]})——出现了薄棱镜/倾斜项(s1..s4/τx,τy),超出 M8 布局。"
+                f"请核查 flags 是否混入了 THIN_PRISM/TILTED 类选项。")
+        D = D[:8]
+    params = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2], *D], dtype=np.float64)
+    rvecs_arr = np.asarray([np.asarray(r, dtype=np.float64).ravel() for r in rvecs],
+                           dtype=np.float64).reshape(n_views, 3)
+    tvecs_arr = np.asarray([np.asarray(t, dtype=np.float64).ravel() for t in tvecs],
+                           dtype=np.float64).reshape(n_views, 3)
+    return params, rvecs_arr, tvecs_arr
+
+
+def _solve_opencv_m8_pass2(objs32, imgs32, size, K1: np.ndarray, D1: np.ndarray,
+                           rational_flags: int) -> tuple:
+    """M8 第二遍拟合:从第一遍解出发的 guess 自再拟合(退化谷确定性洗出)。
+
+    flags = 第一遍 rational flags | CALIB_USE_INTRINSIC_GUESS,guess =
+    第一遍 K/D(产线 D 本就 8 长;OpenCV 返回多于 8 位时余位恒零,截前 8
+    传入)。独立成函数:退化谷单测直接驱动它(构造爆炸系数 guess → 洗回
+    好盆地),不必让 solve_opencv 暴露 guess 注入口。失败契约与第一遍同:
+    cv2.error 收口为中文 ValueError(附视图上下文)。
+    """
+    flags2 = int(rational_flags) | int(cv2.CALIB_USE_INTRINSIC_GUESS)
+    try:
+        # 第 8 个返回值 per_view 同第一遍:float32 口径逐帧表,不读。
+        rms2, K2, D2, rvecs2, tvecs2, _std_int, _std_ext, _per_view = \
+            cv2.calibrateCameraExtended(
+                objs32, imgs32, size,
+                np.array(K1, dtype=np.float64),
+                np.asarray(D1, dtype=np.float64).ravel().reshape(-1, 1),
+                flags=flags2)
+    except cv2.error as e:
+        raise ValueError(
+            f"OpenCV 标定第二遍拟合失败:{e}。"
+            f"第二遍吃第一遍解作初值,理论上不因初值炸——出现此错说明第一遍解"
+            f"病态或数据退化,请检查该批视图的分布。") from e
+    return rms2, K2, D2, rvecs2, tvecs2, flags2
+
+
 def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
-    """OpenCV 初值路径:按配置的畸变模型一次估全畸变,返回"初值版"标定结果。
+    """OpenCV 初值路径:按配置的畸变模型估全畸变,返回"初值版"标定结果。
 
     白话:把角点观测交标定黑盒拿一份能用的起点(内参 + 每视图位姿),
     精度到初值口径为止——后续要么直接消费(精化开关关),要么交给
-    refine_scipy 精化。flags 按模型分派:M2 全 5 畸变 flags=0;M8 加
-    CALIB_RATIONAL_MODEL(不给该 flag 时 OpenCV 对 8 长布局会静默截断)。
+    refine_scipy 精化。flags 按模型分派:M2 全 5 畸变 flags=0,单遍拟合;
+    M8 加 CALIB_RATIONAL_MODEL(不给该 flag 时 OpenCV 对 8 长布局会静默
+    截断)并做两遍拟合(第一遍 fresh → 第二遍 USE_INTRINSIC_GUESS 自再
+    拟合,防 fresh 初值偶发落入 fx-D 简并谷,模块 docstring 有完整实证
+    记录),两遍 cv RMS 都进 solver_meta(opencv_rms_pass1/pass2,不静默;
+    对账键 opencv_rms 取第二遍定稿口径)。M2 路径零改动(已验证契约)。
 
     参数:
         uvs:        (V,P,2) 或逐视图 (P,2) 列表,角点像素坐标(行序契约);
@@ -130,7 +204,7 @@ def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
     try:
         # 第 8 个返回值 per_view 是 float32 口径的逐帧表,剔除判据与报告
         # 一律不用它(Pitfall 12),下划线接收不读。
-        rms, K, D, rvecs, tvecs, _std_int, _std_ext, _per_view = cv2.calibrateCameraExtended(
+        rms1, K1, D1, rvecs1, tvecs1, _std_int, _std_ext, _per_view = cv2.calibrateCameraExtended(
             objs32, imgs32, size, None, None, flags=flags)
     except cv2.error as e:
         raise ValueError(
@@ -139,34 +213,28 @@ def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
             f"请检查该批视图的分布。"
         ) from e
 
-    # 解包断言按模型(防 flags 布局陷阱;OpenCV 把 D 装成 (1,n) 矩阵返回,先拉平):
-    # M2 恰 5 长 [k1,k2,p1,p2,k3];M8 实测(位置探针,cv2 4.14.0)在 rational
-    # flag 下返回 14 长(s1..s4/τx,τy 槽位仅在对应 flag 下非零)——断言
-    # len ≥ 8、余位全零后取前 8([k1,k2,p1,p2,k3,k4,k5,k6])。
-    D = np.asarray(D, dtype=np.float64).ravel()
-    if model == "M2":
-        assert D.shape == (5,), (
-            f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (5,)(M2 布局 {names})。"
-            f"出现此错说明求解调用被改动,请对照参考工程核查。")
-    else:
-        assert D.shape[0] >= 8, (
-            f"OpenCV 解包的畸变向量长度是 {D.shape},M8 布局 {names} 至少要 8 长。"
-            f"出现此错说明 rational flag 未生效或求解调用被改动,请核查。")
-        if D.shape[0] > 8:
-            assert bool(np.allclose(D[8:], 0.0)), (
-                f"OpenCV 解包的畸变向量是 {D.shape[0]} 长,但第 8 位之后非全零"
-                f"({D[8:]})——出现了薄棱镜/倾斜项(s1..s4/τx,τy),超出 M8 布局。"
-                f"请核查 flags 是否混入了 THIN_PRISM/TILTED 类选项。")
-        D = D[:8]
-    params = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2], *D], dtype=np.float64)
-    rvecs_arr = np.asarray([np.asarray(r, dtype=np.float64).ravel() for r in rvecs],
-                           dtype=np.float64).reshape(n_views, 3)
-    tvecs_arr = np.asarray([np.asarray(t, dtype=np.float64).ravel() for t in tvecs],
-                           dtype=np.float64).reshape(n_views, 3)
-    return SolveResult(
-        params=params, rvecs=rvecs_arr, tvecs=tvecs_arr, solver="opencv",
-        solver_meta={"path": "calibrateCameraExtended", "flags_used": int(flags),
-                     "distortion_model": model, "opencv_rms": float(rms)})
+    params1, rvecs_arr, tvecs_arr = _unpack_opencv_solution(
+        model, names, K1, D1, rvecs1, tvecs1, n_views)
+    meta = {"path": "calibrateCameraExtended", "flags_used": int(flags),
+            "distortion_model": model, "opencv_rms": float(rms1)}
+    if model != "M8":
+        return SolveResult(params=params1, rvecs=rvecs_arr, tvecs=tvecs_arr,
+                           solver="opencv", solver_meta=meta)
+
+    # ---- M8 第二遍:guess 自再拟合(退化谷确定性洗出;M2 无此路径)----
+    rms2, K2, D2, rvecs2, tvecs2, flags2 = _solve_opencv_m8_pass2(
+        objs32, imgs32, size, K1, params1[4:], int(flags))
+    params2, rvecs2_arr, tvecs2_arr = _unpack_opencv_solution(
+        model, names, K2, D2, rvecs2, tvecs2, n_views)
+    meta.update({
+        "opencv_rms": float(rms2),           # 对账口径 = 定稿解(第二遍)
+        "opencv_rms_pass1": float(rms1),     # 两遍各自 cv RMS,不静默
+        "opencv_rms_pass2": float(rms2),
+        "pass2_flags_used": int(flags2),
+        "pass2": "fresh rational 后以第一遍解作 guess 自再拟合(防 fx-D 简并谷)",
+    })
+    return SolveResult(params=params2, rvecs=rvecs2_arr, tvecs=tvecs2_arr,
+                       solver="opencv", solver_meta=meta)
 
 
 # ---------------------------------------------------------------------------
