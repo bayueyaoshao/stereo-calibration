@@ -20,6 +20,7 @@ import pytest
 # pytest rootdir 模式(tests/ 无 __init__.py)把 tests 目录插进 sys.path
 from conftest import make_stereo_synth, write_stereo_synth_files
 
+from stereo_calib.intrinsic.models import intrinsic_names
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points
 from stereo_calib.stereo.observation import (
@@ -228,6 +229,49 @@ def test_load_intrinsics_contract_by_name(tmp_path):
     for name, expected in zip(INTRINSIC_NAMES,
                               [1850.0, 1840.0, 1280.0, 720.0, -0.40, 0.23, 1.1e-4, -3.8e-5, -0.08]):
         assert view.params[INTRINSIC_NAMES.index(name)] == pytest.approx(expected)
+
+
+def test_load_intrinsics_without_distortion_model_defaults_m2(tmp_path):
+    """旧产物(无 distortion_model 键,2026-10-24 增补前形态)向后兼容:
+    默认按 M2 解释,契约只增不改既有读取行为。"""
+    path = _write_intrinsics_json(tmp_path)
+    view = load_intrinsics(path)
+    assert view.model == "M2"
+
+
+def test_load_intrinsics_m8_layout(tmp_path):
+    """M8 产物:distortion_model="M8" + params 十二名 + D 8 长 → 按名装载。"""
+    names_m8 = list(intrinsic_names("M8"))
+    params_m8 = {"fx": 2037.4, "fy": 2037.2, "cx": 1279.5, "cy": 719.6,
+                 "k1": 2.7411, "k2": -1.3171, "p1": 0.0002, "p2": -0.0000,
+                 "k3": -0.4289, "k4": 3.5219, "k5": -0.0652, "k6": -1.4662}
+    d8 = [params_m8[n] for n in ("k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6")]
+    path = _write_intrinsics_json(tmp_path, distortion_model="M8",
+                                  params=params_m8, D=d8)
+    view = load_intrinsics(path)
+    assert view.model == "M8"
+    assert view.params.shape == (12,), "M8 params 必须是十二参布局"
+    assert view.D.shape == (8,), "M8 D 必须恰 8 长(OpenCV dist 布局)"
+    for i, name in enumerate(names_m8):
+        assert view.params[i] == pytest.approx(params_m8[name])
+
+
+def test_load_intrinsics_unknown_model_rejected(tmp_path):
+    """distortion_model 白名单外("M1")→ 中文报错,绝不静默按错布局读。"""
+    path = _write_intrinsics_json(tmp_path, distortion_model="M1")
+    with pytest.raises(ValueError, match="不合法"):
+        load_intrinsics(path)
+
+
+def test_load_intrinsics_m8_d_length_mismatch_rejected(tmp_path):
+    """M8 产物 D 被写成 5 长(布局错位前兆)→ 中文报错(Pitfall 13 防线)。"""
+    params_m8 = {n: 0.1 for n in intrinsic_names("M8")}
+    params_m8.update({"fx": 2037.4, "fy": 2037.2, "cx": 1279.5, "cy": 719.6})
+    path = _write_intrinsics_json(tmp_path, distortion_model="M8",
+                                  params=params_m8,
+                                  D=[0.1, -0.1, 0.001, -0.001, 0.01])
+    with pytest.raises(ValueError, match="不合法"):
+        load_intrinsics(path)
 
 
 def test_load_intrinsics_d_layout_tamper_raises(tmp_path):

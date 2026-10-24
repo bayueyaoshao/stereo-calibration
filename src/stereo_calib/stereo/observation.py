@@ -7,7 +7,8 @@
   source / detected / sq_px / win_size),读取一律经
   preprocess.artifacts.load_corners——其 allow_pickle=False 防线已在
   Phase 1 测试锁定,本模块绝不直接调 numpy 的加载接口(T-03-01);
-- intrinsics.json(Phase 2):15 字段按名读,见 load_intrinsics。
+- intrinsics.json(Phase 2):按名读,见 load_intrinsics(distortion_model
+  缺省按 M2 解释,向后兼容 2026-10-24 之前的旧产物)。
 
 连接键(Pattern 1 实测规则):npz 的 image_id = group_id + "_cam{n}"
 (实测形态 20261023_154025_519359_cam1)。逐 CSV 行按连接键在两路 npz 的
@@ -44,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stereo_calib.intrinsic.models import INTRINSIC_NAMES
+from stereo_calib.intrinsic.models import INTRINSIC_NAMES, intrinsic_names
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points, load_corners
 
@@ -255,11 +256,14 @@ def select_pairs(pairs: Pairs, indices) -> Pairs:
 
 @dataclass(frozen=True)
 class IntrinsicsView:
-    """一路相机的固定内参快照(Phase 3 全程只读):K/D 与九名 params 双轨。
+    """一路相机的固定内参快照(Phase 3 全程只读):K/D 与按名 params 双轨。
 
-    params 按 models.INTRINSIC_NAMES = (fx, fy, cx, cy, k1, k2, p1, p2, k3)
-    布局;D 是 OpenCV dist 布局 (k1, k2, p1, p2, k3)——两者切向/径向次序
-    不同,按位置硬拼必错(Pitfall 13),故读取时两轨并存、形状当场断言。
+    params 按模型的 intrinsic_names 布局(M2 = models.INTRINSIC_NAMES 九名
+    fx,fy,cx,cy,k1,k2,p1,p2,k3;M8 十二名再加 k4,k5,k6);D 是 OpenCV
+    dist 布局(M2 5 长;M8 8 长 [k1,k2,p1,p2,k3,k4,k5,k6])——params 与
+    D 的切向/径向次序不同,按位置硬拼必错(Pitfall 13),故读取时两轨
+    并存、形状按模型当场断言。model 记录布局出处("M2" | "M8"),下游
+    (联合 BA 等)按它 fail-closed 分派。
     """
 
     cam: int
@@ -267,14 +271,16 @@ class IntrinsicsView:
     params: np.ndarray
     K: np.ndarray
     D: np.ndarray
+    model: str = "M2"
 
 
 def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
     """按名读取 Phase 2 的 intrinsics.json(固定内参的唯一读取口)。
 
-    params 九名按 models.INTRINSIC_NAMES 导航(禁魔数下标);优先直读
-    K/D 冗余字段并断言 D.shape == (5,)(Pitfall 13 的布局错位防护)。
-    缺字段/形状不合均中文报错。
+    params 按模型布局名导航(禁魔数下标);distortion_model 键缺省按 "M2"
+    解释(向后兼容增补前的旧产物),白名单外中文报错;优先直读 K/D 冗余
+    字段并按模型断言 D 形状(M2 (5,) / M8 (8,))(Pitfall 13 的布局错位
+    防护)。缺字段/形状不合均中文报错。
     """
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -288,19 +294,29 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
             f"它不是 Phase 2 intrinsics 契约的产物,请先运行 stereo-calib intrinsic。"
         )
 
+    # 畸变模型:缺省 M2(旧产物向后兼容);白名单外当场中文报错
+    model = data.get("distortion_model", "M2")
+    if model not in ("M2", "M8"):
+        raise ValueError(
+            f"内参文件 {Path(json_path).name} 不合法:distortion_model 是 "
+            f"{model!r},只支持 'M2'(五参 Brown-Conrady)或 'M8'(rational 8)。"
+            f"请重跑 stereo-calib intrinsic。"
+        )
+    names = INTRINSIC_NAMES if model == "M2" else intrinsic_names(model)
+
     named = data["params"]
     if not isinstance(named, dict):
         raise ValueError(  # noqa: TRY004  同上:类型不对也必须走 ValueError 收口
-            f"内参文件 {Path(json_path).name} 不合法:params 应当是按名九字段的"
+            f"内参文件 {Path(json_path).name} 不合法:params 应当是按名字段的"
             f"JSON 对象,实际是 {type(named).__name__}。请重跑 stereo-calib intrinsic。"
         )
-    missing_names = [name for name in INTRINSIC_NAMES if name not in named]
+    missing_names = [name for name in names if name not in named]
     if missing_names:
         raise ValueError(
             f"内参文件 {Path(json_path).name} 不合法:params 缺参数名 {missing_names}"
-            f"(布局 {INTRINSIC_NAMES})。请重跑 stereo-calib intrinsic。"
+            f"(布局 {names})。请重跑 stereo-calib intrinsic。"
         )
-    params = np.array([float(named[name]) for name in INTRINSIC_NAMES], dtype=np.float64)
+    params = np.array([float(named[name]) for name in names], dtype=np.float64)
 
     K = np.asarray(data["K"], dtype=np.float64)
     if K.shape != (3, 3):
@@ -309,13 +325,14 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
             f"实际是 {K.shape}。请重跑 stereo-calib intrinsic。"
         )
     D = np.asarray(data["D"], dtype=np.float64).ravel()
-    if D.shape != (5,):
-        # 布局错位防护:OpenCV dist 布局恰五项,四项/六项都说明写侧坏掉,
+    expected_d = 5 if model == "M2" else 8
+    if D.shape != (expected_d,):
+        # 布局错位防护:M2 恰五项、M8 恰八项,长度对不上都说明写侧坏掉,
         # 静默塞错切向/径向比报错可怕得多(Pitfall 13)
         raise ValueError(
-            f"内参文件 {Path(json_path).name} 不合法:D 的形状应当是 (5,)"
-            f"(OpenCV dist 布局 k1,k2,p1,p2,k3),实际是 {D.shape}。"
-            f"请重跑 stereo-calib intrinsic。"
+            f"内参文件 {Path(json_path).name} 不合法:D 的形状应当是 "
+            f"({expected_d},)(模型 {model} 的 OpenCV dist 布局),"
+            f"实际是 {D.shape}。请重跑 stereo-calib intrinsic。"
         )
 
     image_size_raw = data["image_size"]
@@ -326,4 +343,4 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
         )
     image_size = (int(image_size_raw[0]), int(image_size_raw[1]))
     return IntrinsicsView(cam=int(data["cam"]), image_size=image_size,
-                          params=params, K=K, D=D)
+                          params=params, K=K, D=D, model=model)

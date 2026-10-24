@@ -15,9 +15,12 @@ RMS 依旧 0.14px,直到双目阶段才以相对位姿假散布暴露)。本模�
               线)。实测该统计量对本类欠拟合无分辨力(M2 0.20 vs R8 0.15),
               仅作信息项报告,不判红。
   A3 切片 fx 稳定性:fx 若在吸收畸变,会随板位漂移——按每帧板中心切 6
-              子集(左/右/上/下/内圈/外圈)各自重标 fx,极差 % 超限判红。
+              子集(左/右/上/下/内圈/外圈)各自重标 fx,极差 % 超限判红
+              (M8 产线解下切片重标自动带 rational flag,与产线同阶)。
   A4 模型阶次探针:全量数据同协议升阶 rational8 重标,fx 跳变 % 超限判红
-              (跳变远超模型内 σ = 低阶模型欠拟合实锤)。
+              (跳变远超模型内 σ = 低阶模型欠拟合实锤);产线解已是 M8 时,
+              探针语义为「cv2 独立重标一致性」——fx 跳变仍检验 fx 吸收
+              畸变型欠拟合,只是不再有更高阶可升。
 
 判定规则(阈值全部来自 config.yaml 的 intrinsic.diagnostics 节):
 A0/A1/A3/A4 红灯数 ≥ min_red_count(默认 2)→ verdict「不可靠」。
@@ -80,7 +83,7 @@ def _as_float64(arr, name: str, shape: tuple | None = None) -> np.ndarray:
         raise ValueError(
             f"体检输入 {name} 形状不合:期望 {shape},实际是 {a.shape}。"
             f"请检查调用方传入的数组排布(uv=(帧数,角点数,2)、objp=(角点数,3)、"
-            f"K=3×3、D=5 长 M2 布局)。"
+            f"K=3×3、D=5 长 M2 / 8 长 M8 布局)。"
         )
     return a
 
@@ -104,7 +107,13 @@ def _validate_inputs(uv, objp, K, D, image_size) -> tuple[np.ndarray, np.ndarray
             f"体检输入角点与物点数不一致:uv 每帧 {uv_arr.shape[1]} 点,"
             f"objp {objp_arr.shape[0]} 点。两者必须逐点对齐。")
     K_arr = _as_float64(K, "K", shape=(3, 3))
-    D_arr = _as_float64(D, "D", shape=(5,))
+    D_arr = _as_float64(D, "D")
+    if D_arr.shape not in ((5,), (8,)):
+        # 布局分派:M2 五参 / M8 rational 8(2026-10-24 增补),其余长度一律拒收
+        raise ValueError(
+            f"体检输入 D 形状不合:期望 (5,)(M2 五参)或 (8,)(M8 rational 8),"
+            f"实际是 {D_arr.shape}。请检查调用方传入的畸变布局与产线 "
+            f"distortion_model 配置是否一致。")
     size = tuple(image_size)
     if len(size) != 2 or any(int(v) != v or v <= 0 for v in size):
         raise ValueError(
@@ -148,12 +157,16 @@ def _refit_fx(uv_sub: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray
               image_size: tuple[int, int], rational: bool) -> tuple[float, float]:
     """同协议重标一份子集/全量数据,返回 (fx, cv2 整体 RMS)。
 
-    flags=CALIB_USE_INTRINSIC_GUESS(初值吃产线 K/D);rational=True 再加
-    CALIB_RATIONAL_MODEL 升阶(A4 探针,D0 仍传 5 长产线值,OpenCV 内部
-    扩到 8 系)。拟合失败以 cv2.error 上抛,由调用方决定记 note 或计数。
+    flags=CALIB_USE_INTRINSIC_GUESS(初值吃产线 K/D);rational=True 或
+    产线 D 为 8 长(M8)时加 CALIB_RATIONAL_MODEL——不给该 flag 时 OpenCV
+    对 8 长布局会静默截断,故 M8 产线解下探针恒为同阶 rational8;M2 五长
+    产线值按 rational 开关决定升阶与否(A4 探针,D0 仍传 5 长产线值,
+    OpenCV 内部扩到 8 系)。拟合失败以 cv2.error 上抛,由调用方决定记
+    note 或计数。
     """
     n = uv_sub.shape[0]
-    flags = cv2.CALIB_USE_INTRINSIC_GUESS | (cv2.CALIB_RATIONAL_MODEL if rational else 0)
+    use_rational = bool(rational) or np.asarray(D).size == 8
+    flags = cv2.CALIB_USE_INTRINSIC_GUESS | (cv2.CALIB_RATIONAL_MODEL if use_rational else 0)
     objs32 = [np.ascontiguousarray(objp, dtype=np.float32).reshape(-1, 1, 3)
               for _ in range(n)]
     imgs32 = [np.ascontiguousarray(p, dtype=np.float32).reshape(-1, 1, 2)
@@ -238,6 +251,9 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
 
     单切片帧数 < a3_min_frames 跳过;有效切片 < 4 → 「数据不足」不计红
     (红灯必须来自真实判定量)。单切片拟合失败(cv2.error)记 note 跳过。
+    产线 D 为 8 长(M8)时切片重标自动带 rational flag(与产线同阶,
+    见 _refit_fx)——切片间 fx 极差度量的是「fx 吸收畸变随板位漂移」,
+    与模型阶次无关。
     """
     u_c = uv.mean(axis=1)[:, 0]
     v_c = uv.mean(axis=1)[:, 1]
@@ -279,21 +295,29 @@ def _check_a4(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
               image_size: tuple[int, int], cfg) -> CheckResult:
     """A4 模型阶次探针:升阶 rational8 全量重标,fx 跳变 %。红:> a4_max_fx_jump_pct。
 
+    M2 产线解:升阶探针(rational8 vs 产线五参);M8 产线解(D 8 长):
+    同阶独立重标一致性探针(cv2 rational8 vs 产线 scipy M8——fx 跳变仍
+    检验 fx 吸收畸变型欠拟合,不再有更高阶可升)。
     探针拟合失败(cv2 异常/非有限解)→ 记 note 不计红(探针故障不许撑红灯)。
     """
     fx_prod = float(K[0, 0])
+    same_order = np.asarray(D).size == 8
+    probe_label = "同阶 rational8 独立重标探针" if same_order else "升阶 rational8 探针"
     try:
         fx8, _rms = _refit_fx(uv, objp, K, D, image_size, rational=True)
     except cv2.error as e:
         return CheckResult("A4", "模型阶次探针", None, float(cfg.a4_max_fx_jump_pct),
-                           False, note=f"升阶 rational8 探针拟合失败(OpenCV 报错),不计红:{e}")
+                           False, note=f"{probe_label}拟合失败(OpenCV 报错),不计红:{e}")
     if not np.isfinite(fx8) or fx8 <= 0.0:
         return CheckResult("A4", "模型阶次探针", None, float(cfg.a4_max_fx_jump_pct),
-                           False, note=f"升阶 rational8 探针解非有限(fx8={fx8}),不计红")
+                           False, note=f"{probe_label}解非有限(fx8={fx8}),不计红")
     jump_pct = float(abs(fx_prod - fx8) / fx8 * 100.0)
     return CheckResult("A4", "模型阶次探针", jump_pct, float(cfg.a4_max_fx_jump_pct),
                        bool(jump_pct > cfg.a4_max_fx_jump_pct),
-                       detail={"fx_production": fx_prod, "fx_rational8": fx8})
+                       note="产线 M8:探针与产线同阶(独立重标一致性)" if same_order else "",
+                       detail={"fx_production": fx_prod, "fx_rational8": fx8,
+                               "probe": "same_order_rational8" if same_order
+                                        else "upgrade_to_rational8"})
 
 
 def _finalize(checks: tuple[CheckResult, ...], notes: tuple[str, ...],
@@ -321,7 +345,8 @@ def run_battery(uv, objp, K, D, image_size, cfg) -> DiagnosticsReport:
     参数:
         uv:          (F,P,2) float64,某相机 train 幸存视图角点(像素);
         objp:        (P,3) float64,与角点同序的板系物点;
-        K / D:       产线定稿解出的 3×3 内参矩阵与 5 长畸变向量(M2 布局);
+        K / D:       产线定稿解出的 3×3 内参矩阵与畸变向量(M2 5 长 /
+                     M8 8 长,按长度分派);
         image_size:  (宽, 高);
         cfg:         IntrinsicDiagnosticsConfig(阈值与判定规则全部来自配置)。
     返回:
@@ -352,11 +377,14 @@ def run_battery(uv, objp, K, D, image_size, cfg) -> DiagnosticsReport:
 
 
 def _jsonify_value(v):
-    """单个数值转 Python 原生类型:np 整数→int、其余数值→float、NaN→None。"""
+    """单个值转 Python 原生类型:np 整数→int、数值→float、NaN→None、
+    字符串原样(A4 探针语义标注等文字型 detail)。"""
     if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
         return int(v)
     if isinstance(v, float | np.floating):
         return None if not np.isfinite(v) else float(v)
+    if isinstance(v, str):
+        return v
     return float(v)
 
 

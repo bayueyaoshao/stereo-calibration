@@ -76,7 +76,7 @@ intrinsic:
     a1_max_bin_mean_px: 0.02           # A1 红:残差径向分量按归一化半径 5 桶均值的绝对值上限(px;结构性欠拟合信号)
     a3_max_fx_range_pct: 0.5           # A3 红:6 切片(左右/上下/内外圈)重标 fx 极差上限(%;fx 吸收畸变必随板位漂移)
     a3_min_frames: 20                  # A3 单切片最少帧数(低于则跳过该切片;有效切片 <4 记「数据不足」不计红)
-    a4_max_fx_jump_pct: 2.0            # A4 红:全量升阶 rational8 探针重标的 fx 跳变上限(%;跳变大=低阶模型欠拟合实锤)
+    a4_max_fx_jump_pct: 2.0            # A4 红:全量 rational8 探针重标的 fx 跳变上限(%;M2 下为升阶探针,M8 下为同阶独立重标一致性;跳变大=fx 吸收畸变实锤)
     min_red_count: 2                   # verdict 判「不可靠」所需最少红灯数(判定规则:A0/A1/A3/A4 任意两项红即 fail-closed)
 
 # ---- 模块3:双目外参标定(消费 Phase 1 对清单/角点 npz + Phase 2 intrinsics.json;固定内参求 R/T)----

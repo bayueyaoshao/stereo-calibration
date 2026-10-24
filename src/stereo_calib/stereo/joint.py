@@ -24,6 +24,12 @@ cv2.Rodrigues 第二返回值,本文件不出现第二份投影/畸变/旋转公
 结构参数(死计算)——稀疏性只经「解析 jac 返回 csr + tr_solver=lsmr」
 这一条真实机制,绝不传稀疏性结构矩阵参数(源码防线测试锁定)。
 
+畸变模型边界(2026-10-24 增补):联合 BA 当前仅支持 M2——θ 的 D 块
+布局(D1 5 | D2 5)按五参定死,12 参 M8 传进来会被 [4:9] 切片静默截断,
+故 refine_joint 入口对 M8 内参 fail-closed 拒收(中文报错);M8 接线
+(θ 布局扩展 + 24 键契约)待后续任务落地后才放开。joint.enabled 默认
+false,run_stereo 入口另有硬门,此处是第二道防线。
+
 dtype 纪律(Pitfall 7):全函数 float64 进出;OpenCV 调用点装包规则不进
 本文件(初值 PnP 住 solve.py)。
 """
@@ -462,11 +468,21 @@ def refine_joint(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
     (refine_stereo 同源);least_squares(method 照 refine_cfg、
     tr_solver="lsmr"、x_scale="jac"、loss="linear"、容差照 refine_cfg);
     收敛判定经 cost_trace + _is_practically_converged/_tail_improvement,
-    判定依据全进 solver_meta 不静默(T-03-06)。"""
+    判定依据全进 solver_meta 不静默(T-03-06)。
+    畸变模型边界:仅支持 M2;M8(D 8 长/params 12 参)入口 fail-closed
+    拒收——θ 的 D 块按五参定死,12 参会被静默截断,绝不带病截断。"""
     uv1 = np.asarray(pairs.uv1, dtype=np.float64)
     uv2 = np.asarray(pairs.uv2, dtype=np.float64)
     objp = np.asarray(pairs.objp, dtype=np.float64)
     n_pairs, n_points = uv1.shape[0], uv1.shape[1]
+    # 畸变模型边界第一道检查(先于形状防线):M8 fail-closed 拒收
+    for intr, what in ((intr1, "intr1"), (intr2, "intr2")):
+        if getattr(intr, "model", "M2") != "M2":
+            raise ValueError(
+                f"联合 BA 不支持畸变模型 {getattr(intr, 'model', 'M2')}({what}.model):"
+                f"θ 的 D 块布局按 M2 五参定死,12 参 M8 会被静默截断(fail-closed "
+                f"拦截)。联合 BA 的 M8 接线尚未落地;joint.enabled 默认 false,"
+                f"请检查 stereo.joint.enabled 与产线 distortion_model 配置。")
     if (init.rvecs1.shape != (n_pairs, 3) or init.tvecs1.shape != (n_pairs, 3)
             or not all(init.per_pair_ok)):
         raise ValueError(

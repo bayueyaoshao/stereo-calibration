@@ -33,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stereo_calib.intrinsic.models import INTRINSIC_NAMES
+from stereo_calib.intrinsic.models import intrinsic_names
 from stereo_calib.io.config import BoardSpec
 
 # 逐帧 CSV 列序契约(INTR-04):utf-8-sig,一行一帧,train 在前 test 在后
@@ -41,10 +41,13 @@ _PER_FRAME_FIELDS = ["image_id", "split", "source", "rms", "dropped", "note"]
 
 # intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
 # 2026-10-24 增补 "diagnostics"(模型充分性体检,只增不改既有字段)
+# 与 "distortion_model"(M2/M8 布局自述,只增不改既有字段;读取方对缺该键
+# 的旧产物默认 M2,向后兼容)
 _INTRINSICS_JSON_KEYS = (
-    "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
-    "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
-    "dropped_frames", "solver_meta", "board", "config_snapshot", "diagnostics",
+    "cam", "distortion_model", "image_size", "params", "K", "D", "solver",
+    "refine_enabled", "rms_train_overall", "rms_test_overall",
+    "n_views_train", "n_views_test", "dropped_frames", "solver_meta",
+    "board", "config_snapshot", "diagnostics",
 )
 
 
@@ -63,16 +66,21 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
                           n_views_train: int, n_views_test: int,
                           dropped_frames: list[dict], solver_meta: dict,
                           board: BoardSpec, config_snapshot: dict,
-                          diagnostics: dict) -> Path:
+                          diagnostics: dict,
+                          distortion_model: str = "M2") -> Path:
     """写一路相机的内参契约文件(Pattern 7,模块 3 的唯一固定内参输入)。
 
-    字段层级(与 RESEARCH Pattern 7 逐字段一致;2026-10-24 增补 diagnostics,
-    只增不改既有字段):
+    字段层级(与 RESEARCH Pattern 7 逐字段一致;2026-10-24 增补 diagnostics
+    与 distortion_model,只增不改既有字段):
         cam:               相机号(int);
+        distortion_model:  "M2" | "M8"(params/D 布局自述;读取方对缺该键的
+                           旧产物默认 M2,向后兼容);
         image_size:        [宽, 高],与标定同源口径;
-        params:            九参数按名(fx/fy/cx/cy/k1/k2/p1/p2/k3);
+        params:            按模型布局按名(M2 九参 fx/fy/cx/cy/k1/k2/p1/p2/k3;
+                           M8 十二参再加 k4/k5/k6);
         K:                 3×3 冗余存储(避免模块 3 重建出错);
-        D:                 [k1,k2,p1,p2,k3] OpenCV 布局,5 长冗余存储;
+        D:                 OpenCV dist 布局冗余存储(M2 5 长;M8 8 长
+                           [k1,k2,p1,p2,k3,k4,k5,k6]);
         solver:            "opencv" | "scipy"(精化开关关闭时为前者);
         refine_enabled:    精化开关留痕;
         rms_train_overall / rms_test_overall:float64 回代 pooled RMS;
@@ -85,13 +93,17 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
                            verdict/red_count/enabled,JSON 可序列化 dict)。
     """
     d_arr = np.asarray(D, dtype=np.float64).ravel()
-    assert d_arr.shape == (5,), (
-        f"畸变向量必须恰 5 长([k1,k2,p1,p2,k3] OpenCV 布局),实际是 {d_arr.shape}。"
-        f"出现此错说明调用方传入的参数布局不是 M2,请检查 params。")
+    names = intrinsic_names(distortion_model)  # 模型名白名单防线(非法名中文报错)
+    expected_d = 5 if distortion_model == "M2" else 8
+    assert d_arr.shape == (expected_d,), (
+        f"畸变向量必须恰 {expected_d} 长(模型 {distortion_model} 的 OpenCV "
+        f"dist 布局 {names}),实际是 {d_arr.shape}。出现此错说明调用方传入的 "
+        f"params 布局与 distortion_model 不一致,请检查 params。")
     payload = {
         "cam": int(cam),
+        "distortion_model": str(distortion_model),
         "image_size": [int(image_size[0]), int(image_size[1])],
-        "params": {name: float(v) for name, v in zip(INTRINSIC_NAMES, params)},
+        "params": {name: float(v) for name, v in zip(names, params)},
         "K": [[float(v) for v in row] for row in np.asarray(K, dtype=np.float64)],
         "D": [float(v) for v in d_arr],
         "solver": str(solver),
@@ -195,9 +207,13 @@ def _render_diagnostics_section(lines: list[str], per_cam_summaries: list[dict],
     """
     lines.append("## 模型充分性体检")
     lines.append("")
-    snap = config_snapshot.get("intrinsic", {}).get("diagnostics", {}) \
+    snap = config_snapshot.get("intrinsic", {}) \
         if isinstance(config_snapshot, dict) else {}
-    min_red = snap.get("min_red_count") if isinstance(snap, dict) else None
+    diag_model = snap.get("distortion_model", "M2") if isinstance(snap, dict) else "M2"
+    lines.append(f"畸变模型:{diag_model}(A4 探针在 M8 产线解下为同阶 rational8 "
+                 "独立重标一致性检验,M2 下为升阶探针)。")
+    snap_diag = snap.get("diagnostics", {}) if isinstance(snap, dict) else {}
+    min_red = snap_diag.get("min_red_count") if isinstance(snap_diag, dict) else None
     rule = f"A0/A1/A3/A4 任意 {min_red} 项" if min_red is not None \
         else "A0/A1/A3/A4 红灯数达 min_red_count"
     lines.append(f"判定规则:{rule}红灯 → 判「内参不可靠」(fail-closed:禁止消费该内参"
@@ -260,11 +276,19 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
 
+    # 畸变模型从配置快照取(一次运行一份配置 → 两路同一模型)
+    snap_intrinsic = config_snapshot.get("intrinsic", {}) \
+        if isinstance(config_snapshot, dict) else {}
+    model = snap_intrinsic.get("distortion_model", "M2") \
+        if isinstance(snap_intrinsic, dict) else "M2"
+    names = intrinsic_names(model)
+
     lines.append("# 内参标定报告")
     lines.append("")
     lines.append(f"- 生成时间:{datetime.now().isoformat(timespec='seconds')}")
     lines.append(f"- test 集判定阈值 rms_test_max:{rms_test_max} px(报告判定用,不作退出条件)")
-    lines.append(f"- 相机:cam1、cam2 各自独立标定(M2 模型,九参数按名),共 {len(per_cam_summaries)} 路")
+    lines.append(f"- 相机:cam1、cam2 各自独立标定({model} 模型,{len(names)} 参数按名),"
+                 f"共 {len(per_cam_summaries)} 路")
     lines.append("")
 
     # ---- 指标汇总:两路对比表 ----
@@ -296,7 +320,7 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
             lines.append(f"- cam{s['cam']}:{s['error']}")
         lines.append("")
 
-    # ---- 内参参数表:成功路 9 参数按名 ----
+    # ---- 内参参数表:成功路按模型布局按名(M2 九参 / M8 十二参)----
     ok_cams = [s for s in per_cam_summaries if not s.get("failed")]
     lines.append("## 内参参数(按名)")
     lines.append("")
@@ -306,7 +330,7 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
     else:
         lines.append("| 参数 | " + " | ".join(f"cam{s['cam']}" for s in ok_cams) + " |")
         lines.append("|---" * (len(ok_cams) + 1) + "|")
-        for name in INTRINSIC_NAMES:
+        for name in names:
             cells = " | ".join(f"{s['params'][name]:.6g}" for s in ok_cams)
             lines.append(f"| {name} | {cells} |")
         lines.append("")

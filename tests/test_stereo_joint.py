@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import cv2
 import numpy as np
 import pytest
@@ -268,3 +270,23 @@ def test_joint_spread_defense_fail_closed():
                              _joint_cfg(variant="fc", spread_ratio_max=1e9))
     assert out.joint_meta["spread_ratio"] > 5.0, (
         "注入坏对后 spread_ratio 应 > 5(防线判别力的数值证据)")
+
+
+# ---------- 畸变模型边界:M8 fail-closed 拒收(2026-10-24 增补) ----------
+
+def test_refine_joint_rejects_m8_fail_closed():
+    """联合 BA 当前仅支持 M2:M8 内参入口当场拒收(θ 的 D 块按五参定死,
+    12 参 M8 走 [4:9] 切片会被静默截断——绝不带病截断,中文报错点名)。"""
+    synth = make_stereo_synth(n_pairs=4, seed=7)
+    pairs = _pairs_from_synth(synth)
+    intr1, intr2 = _intr_views(synth.params1, synth.params2)
+    init = pnp_median(pairs, intr1, intr2, None)
+    intr1_m8 = dataclasses.replace(intr1, model="M8")
+    with pytest.raises(ValueError, match="不支持"):
+        refine_joint(pairs, intr1_m8, intr2, init,
+                     _joint_cfg(), StereoRefineConfig())
+    # cam2 侧同样拦(两路任一 M8 都不许进)
+    intr2_m8 = dataclasses.replace(intr2, model="M8")
+    with pytest.raises(ValueError, match="不支持"):
+        refine_joint(pairs, intr1, intr2_m8, init,
+                     _joint_cfg(), StereoRefineConfig())

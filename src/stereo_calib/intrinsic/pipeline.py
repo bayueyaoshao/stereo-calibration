@@ -52,7 +52,7 @@ from stereo_calib.intrinsic.artifacts import (
 )
 from stereo_calib.intrinsic.diagnostics import diagnostics_to_dict, run_battery
 from stereo_calib.intrinsic.metrics import compute_metrics
-from stereo_calib.intrinsic.models import INTRINSIC_NAMES, intrinsics_matrix
+from stereo_calib.intrinsic.models import intrinsic_names, intrinsics_matrix
 from stereo_calib.intrinsic.observation import load_views
 from stereo_calib.intrinsic.scoring import score_pose_only
 from stereo_calib.intrinsic.solve import solve_calibration
@@ -83,8 +83,10 @@ def _drop_outliers(cfg: StereoCalibConfig, train) -> tuple[list[dict], list[int]
     n_initial = len(train.image_ids)
     survived = list(range(n_initial))
     no_refine = RefineConfig(enabled=False)
+    model = cfg.intrinsic.distortion_model
     for round_i in range(1, outlier.max_iterations + 1):
-        res = solve_calibration(train.uv[survived], train.objp, train.image_size, no_refine)
+        res = solve_calibration(train.uv[survived], train.objp, train.image_size,
+                                no_refine, model)
         m = compute_metrics(train.objp, train.uv[survived], res.params, res.rvecs, res.tvecs)
         med = float(np.median(m.per_view_rms))
         threshold = outlier.rms_multiplier * med
@@ -170,11 +172,14 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
     drop_by_idx = dict(zip(dropped_idx, dropped))
 
     # ---- 幸存集定稿(剔除循环全程 OpenCV 初值解,精化只做这一次)----
+    # 畸变模型按配置(M2/M8)贯穿剔除循环与定稿求解(2026-10-24 增补)
+    model = cfg.intrinsic.distortion_model
     keep = [i for i in range(n_initial) if i not in drop_by_idx]
     uvs_train = train.uv[keep]
     refine_state = "开" if cfg.intrinsic.refine.enabled else "关"
-    typer.echo(f"cam{cam}:幸存 {len(keep)} 帧定稿求解(精化:{refine_state})……")
-    final = solve_calibration(uvs_train, train.objp, train.image_size, cfg.intrinsic.refine)
+    typer.echo(f"cam{cam}:幸存 {len(keep)} 帧定稿求解(模型 {model},精化:{refine_state})……")
+    final = solve_calibration(uvs_train, train.objp, train.image_size,
+                              cfg.intrinsic.refine, model)
     m_final = compute_metrics(train.objp, uvs_train, final.params, final.rvecs, final.tvecs)
     typer.echo(f"cam{cam}:train 幸存集回代 RMS {m_final.rms_overall:.4f}px(solver={final.solver})")
 
@@ -182,9 +187,10 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
     # 标量 RMS 看不出的畸变模型欠拟合(如 fx 被推高 11%)由 A0/A1/A3/A4
     # 揪出;数值与判定进 intrinsics.json 的 diagnostics 键(契约只增)与
     # report.md 体检节。verdict 在 run_intrinsic 收口(两路齐后再判)。
+    # D 传产线解全尾部(5 长 M2 / 8 长 M8,体检内部按长度分派)。
     diag_report = run_battery(uvs_train, train.objp,
                               intrinsics_matrix(final.params),
-                              np.asarray(final.params[4:9], dtype=np.float64),
+                              np.asarray(final.params[4:], dtype=np.float64),
                               train.image_size, cfg.intrinsic.diagnostics)
     diagnostics = diagnostics_to_dict(diag_report)
     for chk in diag_report.checks:
@@ -228,13 +234,13 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
     kept_ids = [train.image_ids[i] for i in keep]
     json_path = write_intrinsics_json(
         cam_dir / "intrinsics.json", cam=cam, image_size=train.image_size,
-        params=final.params, K=intrinsics_matrix(final.params), D=final.params[4:9],
+        params=final.params, K=intrinsics_matrix(final.params), D=final.params[4:],
         solver=final.solver, refine_enabled=cfg.intrinsic.refine.enabled,
         rms_train_overall=m_final.rms_overall, rms_test_overall=rms_test_overall,
         n_views_train=len(keep), n_views_test=len(test.image_ids),
         dropped_frames=dropped, solver_meta=final.solver_meta,
         board=cfg.board, config_snapshot={"intrinsic": asdict(cfg.intrinsic)},
-        diagnostics=diagnostics)
+        diagnostics=diagnostics, distortion_model=model)
     train_res_path = write_residuals_npz(
         cam_dir / "train_residuals.npz", kept_ids, m_final.residuals, m_final.per_view_rms)
     test_res_path = write_residuals_npz(
@@ -245,7 +251,8 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
 
     summary = {
         "cam": cam,
-        "params": {name: float(v) for name, v in zip(INTRINSIC_NAMES, final.params)},
+        "distortion_model": model,
+        "params": {name: float(v) for name, v in zip(intrinsic_names(model), final.params)},
         "solver": final.solver,
         "refine_enabled": bool(cfg.intrinsic.refine.enabled),
         "rms_train_overall": m_final.rms_overall,

@@ -28,6 +28,7 @@ from stereo_calib.intrinsic.artifacts import (
 from stereo_calib.intrinsic.metrics import compute_metrics
 from stereo_calib.intrinsic.models import (
     INTRINSIC_NAMES,
+    intrinsic_names,
     intrinsics_matrix,
     project,
     transform_to_camera,
@@ -231,11 +232,13 @@ def test_metrics_and_observation_source_guards():
 # ===========================================================================
 
 # intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
-# 2026-10-24 增补 "diagnostics"(模型充分性体检),契约只增不改既有字段
+# 2026-10-24 增补 "diagnostics"(模型充分性体检)与 "distortion_model"
+# (M2/M8 布局自述),契约只增不改既有字段
 _JSON_KEYS = {
-    "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
-    "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
-    "dropped_frames", "solver_meta", "board", "config_snapshot", "diagnostics",
+    "cam", "distortion_model", "image_size", "params", "K", "D", "solver",
+    "refine_enabled", "rms_train_overall", "rms_test_overall",
+    "n_views_train", "n_views_test", "dropped_frames", "solver_meta",
+    "board", "config_snapshot", "diagnostics",
 }
 
 
@@ -271,6 +274,30 @@ def test_write_intrinsics_json_roundtrip(tmp_path):
     assert payload["solver_meta"]["opencv_rms"] == pytest.approx(2.5782)
     assert payload["board"]["cols"] == 11 and payload["board"]["square_size_mm"] == 25.0
     assert payload["diagnostics"] == diagnostics, "diagnostics 键必须原样落盘(只增契约)"
+    assert payload["distortion_model"] == "M2", "缺省写侧必须自述 M2(向后兼容锚)"
+
+
+def test_write_intrinsics_json_m8_layout(tmp_path):
+    """M8 写侧:distortion_model="M8" → params 十二名按名、D 恰 8 长、键自述 M8。"""
+    params_m8 = np.array([2037.4, 2037.2, 1279.5, 719.6,
+                          2.7411, -1.3171, 0.0002, -0.0000, -0.4289,
+                          3.5219, -0.0652, -1.4662])
+    out = write_intrinsics_json(
+        tmp_path / "cam1" / "intrinsics.json", cam=1, image_size=(2560, 1440),
+        params=params_m8, K=intrinsics_matrix(params_m8), D=params_m8[4:],
+        solver="scipy", refine_enabled=True, rms_train_overall=0.0765,
+        rms_test_overall=0.0755, n_views_train=141, n_views_test=15,
+        dropped_frames=[], solver_meta={"status": 0},
+        board=BoardSpec(), config_snapshot={"intrinsic": {"distortion_model": "M8"}},
+        diagnostics={"enabled": False}, distortion_model="M8")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert set(payload) == _JSON_KEYS
+    assert payload["distortion_model"] == "M8"
+    assert list(payload["params"]) == list(intrinsic_names("M8")), (
+        "M8 params 必须按十二名布局(模块 3 的固定接口)")
+    for name, v in zip(intrinsic_names("M8"), params_m8):
+        assert payload["params"][name] == pytest.approx(float(v))
+    assert payload["D"] == pytest.approx(list(params_m8[4:])), "M8 D 必须恰 8 长冗余存储"
 
 
 def test_write_residuals_npz_roundtrip(tmp_path):
@@ -683,14 +710,14 @@ def test_run_intrinsic_single_camera_failure_degrades_not_aborts(tmp_path, monke
     real_solve = pipeline_mod.solve_calibration
     refined_calls = {"n": 0}
 
-    def flaky_solve(uvs, objp, image_size, refine_cfg):
+    def flaky_solve(uvs, objp, image_size, refine_cfg, model="M2"):
         # 剔除循环走 no_refine(enabled=False);带精化的定稿求解每路恰一次、
         # 按cam 序串行——第 2 次精化调用即 cam2,精准注入单路失败。
         if refine_cfg.enabled:
             refined_calls["n"] += 1
             if refined_calls["n"] == 2:
                 raise AssertionError("project 收到 Z<=0 的点(测试注入:模拟数据防卫触发)")
-        return real_solve(uvs, objp, image_size, refine_cfg)
+        return real_solve(uvs, objp, image_size, refine_cfg, model)
 
     monkeypatch.setattr(pipeline_mod, "solve_calibration", flaky_solve)
     _run_intrinsic_in(tmp_path)  # 不抛即第一契约:单路失败不中断整批

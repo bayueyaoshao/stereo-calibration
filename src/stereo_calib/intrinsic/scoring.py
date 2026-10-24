@@ -58,7 +58,8 @@ def score_pose_only(uv, objp, params) -> PoseScore:
     参数:
         uv:     (P,2) 单视角实测角点(像素),P >= 4;
         objp:   (P,3) 物点网格(与 uv 逐行对齐,Z=0 棋盘平面);
-        params: (9,) 标定得到的内参参数向量(布局 INTRINSIC_NAMES,固定不动)。
+        params: (9,)/(12,) 标定得到的内参参数向量(布局 intrinsic_names(模型),
+                固定不动)。
     返回:
         PoseScore(rms, residuals, note)——任何失败路径都不抛异常。
     """

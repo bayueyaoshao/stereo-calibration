@@ -210,6 +210,25 @@ def test_battery_green_on_m2_consistent_truth_and_input_readonly():
     assert np.array_equal(uv, uv_before), "体检只读数据:输入 uv 绝不许被改写"
 
 
+def test_battery_m8_production_layout_battery_runs_green():
+    """M8 产线布局(D 8 长):体检按长度分派正常运转,一致真值判可靠。
+
+    真值即产线解(cv2 rational8 一致数据):A3 切片重标自动带 rational
+    flag(与产线同阶,见 _refit_fx);A4 探针走「同阶独立重标一致性」
+    语义,detail 显式标 same_order_rational8(与 M2 的升阶探针区分)。
+    """
+    uv = _synth_uv(_D8_RATIONAL, 24, seed=11)
+    cfg = IntrinsicDiagnosticsConfig(a3_min_frames=5)  # 24 帧切 6 片各 ~4 帧须放低下限
+    report = run_battery(uv, _OBJP, _K_TRUE, _D8_RATIONAL, _SIZE, cfg)
+    assert report.verdict == "可靠", f"M8 一致真值不许误判不可靠:{report.red_names}"
+    by_name = {c.name: c for c in report.checks}
+    a4 = by_name["A4"]
+    assert a4.detail["probe"] == "same_order_rational8", (
+        "M8 产线解下 A4 必须标注同阶探针语义(与升阶探针区分)")
+    assert a4.value is not None and np.isfinite(a4.value)
+    assert np.isfinite(by_name["A3"].value), "a3_min_frames=5 时判定量应走数值路径"
+
+
 def test_battery_threshold_wiring_all_four_red():
     """阈值接线:收紧四条红线(数据本身干净)→ 四检查全红、判不可靠。
 
@@ -301,6 +320,8 @@ def test_battery_a0_empty_center_bucket_notes_not_red():
         (lambda uv, objp: run_battery(uv, objp, _K_TRUE[:2, :], _D5_TRUE, _SIZE,
                                       _DEFAULT_CFG), "K 形状"),
         (lambda uv, objp: run_battery(uv, objp, _K_TRUE, _D5_TRUE[:4], _SIZE,
+                                      _DEFAULT_CFG), "D 形状"),
+        (lambda uv, objp: run_battery(uv, objp, _K_TRUE, np.zeros(6), _SIZE,
                                       _DEFAULT_CFG), "D 形状"),
         (lambda uv, objp: run_battery(uv, objp, _K_TRUE, _D5_TRUE, (2560,),
                                       _DEFAULT_CFG), "image_size"),

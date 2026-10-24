@@ -41,7 +41,8 @@ def compute_metrics(objp: np.ndarray, uvs: np.ndarray, params: np.ndarray,
                     rvecs: np.ndarray, tvecs: np.ndarray) -> ResidualMetrics:
     """按视图循环回代计算残差与 RMS(视图内全 numpy 向量化,Pitfall 5)。
 
-    参数形状:objp (P,3);uvs (V,P,2);params (9,)(布局 INTRINSIC_NAMES);
+    参数形状:objp (P,3);uvs (V,P,2);params (9,)/(12,)(布局
+    intrinsic_names(模型):M2 九参 / M8 十二参);
     rvecs/tvecs (V,3)——位姿必须与 uvs 视图逐行对齐(行序契约,Pitfall 4/10),
     错位不报错、只是悄悄算错,装载层的行序锁是它的上游防线。
     """
