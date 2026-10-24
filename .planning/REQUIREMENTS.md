@@ -22,6 +22,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INTR-02**: 输出两路相机内参文件(参数按名保存 + 图像分辨率)
 - [x] **INTR-03**: 用 test 集角点计算每路相机整体重投影 RMS(float64 回代计算,不用 OpenCV 返回值)
 - [x] **INTR-04**: 输出内参标定报告(逐帧误差 + 整体指标)
+- [x] **INTR-05**(quick 261024 增补): 内参模型充分性体检闸门——A0 残差能量比 / A1 残差径向结构 / A2 去畸变直线度(仅报告不判红)/ A3 切片 fx 稳定性 / A4 升阶 rational8 探针;红检数 ≥ min_red_count 判「内参不可靠」,fail-closed 拦截其进入双目标定(产物留痕后中文报错、退出码 1),阈值全部进 config.yaml
 
 ### 模块3 — 双目标定 (STER)
 
@@ -68,6 +69,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INTR-02 | Phase 2 | Complete (02-03 契约, 02-04 验收) |
 | INTR-03 | Phase 2 | Complete (02-02 引擎, 02-04 验收) |
 | INTR-04 | Phase 2 | Complete (02-03 报告, 02-04 验收) |
+| INTR-05 | Phase 2 (quick 261024 增补) | Complete (体检闸门 fail-closed 接入, 生产双机判不可靠) |
 | STER-01 | Phase 3 | Pending |
 | STER-02 | Phase 3 | Pending |
 | STER-03 | Phase 3 | Pending |
@@ -78,10 +80,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 **Coverage:**
 
-- v1 requirements: 17 total
-- Mapped to phases: 17 ✓
+- v1 requirements: 18 total
+- Mapped to phases: 18 ✓
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-24 after 02-04 (INTR-01/02/03/04 complete: CLI 一条命令真实数据生产运行,两路 test RMS 0.1407/0.1361px < 1.0 判 PASS,产物/报告落盘 + data/ 只读指纹验证;前次 2026-10-23 after 01-03:PREP-04/PREP-06/INFRA-03 勾选,PREP-01/03/05/INFRA-01/02 由 01-01 落地补记)*
+*Last updated: 2026-10-24 after quick 261024-intrinsic-adequacy-battery (INTR-05 增补:内参模型充分性体检闸门 fail-closed 接入内参管线,生产重跑双机判「不可靠」退出码 1;前次 2026-10-24 after 02-04:INTR-01/02/03/04 complete,两路 test RMS 0.1407/0.1361px)*

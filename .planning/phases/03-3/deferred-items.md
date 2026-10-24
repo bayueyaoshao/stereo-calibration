@@ -53,3 +53,19 @@
   文件。本期 Python 侧消费不受影响,按 review 结论不修;后续如加固,写侧
   非有限值显式转 null 并在 report 标注。
 
+### 2026-10-24 · quick 261024-intrinsic-adequacy-battery · rational8 产线支持 + 重标定待办(登记)
+
+- **来源:** 内参模型充分性体检(quick 261024)生产实证——M2 五参畸变模型对
+  本相机欠拟合,cam1/cam2 体检均判「内参不可靠」(cam1 红 A1/A3/A4、cam2 红
+  A1/A3;A4 升阶 rational8 探针 cam1 fx 跳变 11.19%、cam2 0.74%,说明 M2 的
+  fx 存在系统性虚高,标量 RMS 看不出)。体检已 fail-closed 拦截内参进入
+  双目标定(明细见 `output/intrinsic/report.md` 体检表格)。
+- **待办(需用户/后续计划决策与排期):**
+  1. 产线支持 rational8 畸变模型(扩展 models.py M2 契约或新增 M8 模型,
+     含 INTRINSIC_NAMES/契约键/精化雅可比适配);
+  2. 用 rational8 对两路相机重新标定内参(Phase 2 重标,体检复核应转绿);
+  3. 内参就绪后 Phase 3 双目标定重跑(SC3 距离残差验收)。
+- **说明:** 本期只做体检闸门(可换模型不依赖),不改 M2 契约与
+  INTRINSIC_NAMES;合成端到端已验证 rational 真值必判不可靠、M2 一致真值
+  必判可靠。
+
