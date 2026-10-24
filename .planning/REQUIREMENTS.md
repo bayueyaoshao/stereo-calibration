@@ -23,14 +23,16 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INTR-03**: 用 test 集角点计算每路相机整体重投影 RMS(float64 回代计算,不用 OpenCV 返回值)
 - [x] **INTR-04**: 输出内参标定报告(逐帧误差 + 整体指标)
 - [x] **INTR-05**(quick 261024 增补): 内参模型充分性体检闸门——A0 残差能量比 / A1 残差径向结构 / A2 去畸变直线度(仅报告不判红)/ A3 切片 fx 稳定性 / A4 升阶 rational8 探针;红检数 ≥ min_red_count 判「内参不可靠」,fail-closed 拦截其进入双目标定(产物留痕后中文报错、退出码 1),阈值全部进 config.yaml
-- [x] **INTR-06**(quick 261024-rational8-production 增补): `distortion_model` 可配置 M2/M8——M8 = rational 8(D 长 8,k4/k5/k6 为分母项,12 参):models 单一公式源双模型(den≡1 即 M2)、solve flags/D 解包按模型、intrinsics.json 新增顶层 `distortion_model` 键(只增不改,旧文件缺省 M2 向后兼容)、体检 M8 适配(A4 自动变同阶独立重标一致性探针)、joint 对 M8 fail-closed 拒收;生产实证 cam1 体检转绿(fx=2042.89 落参考锚点 2037±1% 带)、cam2 结构性残差仍不可靠(见 deferred-items,阻塞双目重跑)
+- [x] **INTR-06**(quick 261024-rational8-production 增补): `distortion_model` 可配置 M2/M8——M8 = rational 8(D 长 8,k4/k5/k6 为分母项,12 参):models 单一公式源双模型(den≡1 即 M2)、solve flags/D 解包按模型、intrinsics.json 新增顶层 `distortion_model` 键(只增不改,旧文件缺省 M2 向后兼容)、体检 M8 适配(A4 自动变同阶独立重标一致性探针)、joint 对 M8 fail-closed 拒收;生产实证(追加轮洗盆后)两相机体检 reliable 全绿:cam1 fx=2037.04(+0.002%)/cam2 fx=2037.52(+0.025%),均落参考锚点 2037±1% 带,红检 0 项
 
 ### 模块3 — 双目标定 (STER)
 
-- [ ] **STER-01**: 用固定内参 + train 集公共视场角点求双目外参:PnP-median 初值(每共视图两路 solvePnP → 相对位姿 → 全帧中位数,不用 `cv2.stereoCalibrate`)+ scipy 外参精化
-- [ ] **STER-02**: 输出双目外参 R/T(cam1 为参考系)及 baseline 距离
-- [ ] **STER-03**: test 集验证:角点序 180° 消歧 → 去畸变 → DLT 三角化 → 板系最远两角点物理距离 vs 真值(√(10²+7²)×25mm),输出残差 RMS
-- [ ] **STER-04**: 输出双目标定报告(每帧距离残差 + 整体 RMS)
+- [x] **STER-01**: 用固定内参 + train 集公共视场角点求双目外参:PnP-median 初值(每共视图两路 solvePnP → 相对位姿 → 全帧中位数,不用 `cv2.stereoCalibrate`)+ scipy 外参精化
+- [x] **STER-02**: 输出双目外参 R/T(cam1 为参考系)及 baseline 距离
+- [x] **STER-03**: test 集验证:角点序 180° 消歧 → 去畸变 → DLT 三角化 → 板系最远两角点物理距离 vs 真值(√(10²+7²)×25mm),输出残差 RMS
+- [x] **STER-04**: 输出双目标定报告(每帧距离残差 + 整体 RMS)
+
+> 生产实证(quick 261024-rational8-production 追加轮,M8+洗盆内参):train 距离 RMS 0.2321mm / test 0.2001mm(阈值 5mm PASS),baseline 798.11mm,180° 翻转 0,剔除 0 对,SC1-SC4 全过,退出码 0。
 
 ### 工程基础 (INFRA)
 
@@ -71,11 +73,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INTR-03 | Phase 2 | Complete (02-02 引擎, 02-04 验收) |
 | INTR-04 | Phase 2 | Complete (02-03 报告, 02-04 验收) |
 | INTR-05 | Phase 2 (quick 261024 增补) | Complete (体检闸门 fail-closed 接入, 生产双机判不可靠) |
-| INTR-06 | Phase 2 (quick 261024-rational8-production 增补) | Complete (M8 全链支持, 270 测试; 生产: cam1 reliable / cam2 结构性残差仍不可靠, 双目重跑阻塞) |
-| STER-01 | Phase 3 | Pending |
-| STER-02 | Phase 3 | Pending |
-| STER-03 | Phase 3 | Pending |
-| STER-04 | Phase 3 | Pending |
+| INTR-06 | Phase 2 (quick 261024-rational8-production 增补) | Complete (M8 全链支持 + 追加轮洗盆; 273 测试; 生产: 两相机 reliable 全绿 fx=2037.04/2037.52) |
+| STER-01 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; SC1 过) |
+| STER-02 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; baseline 798.11mm) |
+| STER-03 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; test 距离 RMS 0.2001mm ≪ 5mm) |
+| STER-04 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; report.md 双目节) |
 | INFRA-01 | Phase 1 | Complete |
 | INFRA-02 | Phase 1 | Complete |
 | INFRA-03 | Phase 1 | Complete (01-03) |
@@ -88,4 +90,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-24 after quick 261024-rational8-production (INTR-06 增补:M8 rational8 全链支持,cam1 体检转绿 fx=2042.89/cam2 结构性残差仍不可靠;前次 2026-10-24 after quick 261024-intrinsic-adequacy-battery:INTR-05 增补,双机判不可靠;前次 02-04:INTR-01..04 complete,两路 test RMS 0.1407/0.1361px)*
+*Last updated: 2026-10-24 after quick 261024-rational8-production 追加轮 (M8 洗盆落盆后:两相机体检 reliable 全绿 fx=2037.04/2037.52,双目 SC1-SC4 全过 test 距离 RMS 0.2001mm,STER-01..04 complete;前次 2026-10-24 after quick 261024-rational8-production:M8 全链支持,cam1 体检转绿/cam2 honest-stop;前次 2026-10-24 after quick 261024-intrinsic-adequacy-battery:INTR-05 增补,双机判不可靠;前次 02-04:INTR-01..04 complete,两路 test RMS 0.1407/0.1361px)*

@@ -8,7 +8,7 @@
 
 - [x] **Phase 1: 工程骨架 + 模块1 数据预处理** — 配置驱动工程骨架,角点检测/筛选/清单输出端到端可运行 (completed 2026-10-23)
 - [x] **Phase 2: 模块2 内参标定** — 两路相机 M2 内参标定 + test 集 RMS 验证 (completed 2026-10-23)
-- [ ] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证(blocked 2026-10-24:SC3 生产验收 FAIL,test 距离残差 16.93mm ≫ 5mm;CLI/链路已就绪,根因为两路内参在双目精度下互不兼容;联合 BA gap-closure 03-05 裁决三变体全灭——内参漂移越诊断界,后续方案待决策)
+- [x] **Phase 3: 模块3 双目标定** — PnP-median + 精化求外参 R/T,test 集物理距离残差验证(completed 2026-10-24,quick 261024-rational8-production 追加轮收口:M8 rational8 内参 + 洗盆修复后双目重跑,test 距离 RMS 0.2001mm ≪ 5mm 阈值,baseline 798.11mm,SC1-4 全过;03-04 首跑 SC3 16.93mm FAIL 与 03-05 联合 BA 三变体全灭的失败诊断保留留档——最终解 = M8 独立内参 + 固定内参双目链,无需联合 BA)
 
 ## Phase Details
 
@@ -112,7 +112,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. 工程骨架 + 模块1 数据预处理 | 3/3 | Complete    | 2026-10-23 |
 | 2. 模块2 内参标定 | 4/4 | Complete    | 2026-10-23 |
-| 3. 模块3 双目标定 | 5/5 executed,03-04/03-05 blocked | Blocked — 联合 BA 裁决全灭(漂移越界),待方案决策 |  |
+| 3. 模块3 双目标定 | 5/5 executed + quick 261024-rational8-production 追加轮验收 | Complete — M8+洗盆内参双目重跑 test 距离 RMS 0.2001mm(SC1-4 全过,STER-01..04 complete) | 2026-10-24 |
 
 ---
 *Roadmap created: 2026-10-23. Granularity: coarse. Coverage: 17/17 v1 requirements mapped.*

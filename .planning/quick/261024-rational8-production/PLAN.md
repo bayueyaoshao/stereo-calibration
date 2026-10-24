@@ -1,10 +1,46 @@
 ---
 type: quick
-status: blocked
+status: in-progress
 priority: high
 created: 2026-10-24
 source: 用户指令「双目测量误差是参考工程2的10倍,再想办法优化」(2026-10-24);归因结论 = 唯一优化路径是产线支持 rational8 畸变模型(见 .planning/phases/03-3/deferred-items.md 登记)
 ---
+
+## 追加轮(2026-10-24 午,用户指令「再想办法优化」延续;cam2 honest-stop 后的根因修复)
+
+第一轮执行 honest-stop 于 cam2 体检红 A1=0.028/A3=0.94%。追加探针(/tmp/thinprism_probe_cam2.py、
+/tmp/init_recipe_probe2.py、/tmp/a3_nature_probe.py、/tmp/a3_fixed_dist_probe.py,全部真实数据实证)
+已把 cam2 红灯**完全归因**,两项都是可修的实现问题,不是数据/光学问题:
+
+1. **退化谷盆地问题(根因)**:cv2 fresh RATIONAL 初始化会偶发落入 rational 模型的
+   fx-D 简并谷(产线 cam2 解 D=[1.78, 74.6, …, 76.5, 71.3] 系数爆炸互相抵消,fx 2034.88
+   偏离锚点 2037,残差带结构 A1=0.028)。**修法(已验证)**:M8 求解做第二遍
+   cv2 拟合(RATIONAL|USE_INTRINSIC_GUESS,guess=第一遍解)——从退化谷 guess 出发
+   实测洗回好盆地(cam2 fx 2037.53,A1 0.0011;好盆地对两相机稳定,cam1 再拟合不变绿)。
+   M2 路径不动(已验证契约)。
+2. **A3 度量在 M8 下被简并放大**:切片全自由重拟合的 fx 弱可辨识(沿谷漂移),
+   cam2 外圈切片曾读出 fx 2021 的假信号。**修法(已验证)**:A3 切片重拟合对 M8
+   冻结全部畸变系数(FIX_K1..K6|FIX_TANGENT_DIST,只放 fx,fy+位姿)——fx 变成
+   唯一辨识的场依赖信号。实测:cam1 0.157% / cam2 0.199%,全绿且裕量充足
+   (阈值 0.5%);冻结协议下 cam2 外圈 fx=2037.3 正落锚点。M2 协议不变。
+   有效焦距曲线 fx·s(r) 佐证:内外圈拟合曲线平行重合(差 −0.09%~−0.39%,主部为
+   简并漂移),证明无真实场依赖。
+3. thin-prism/tilted 升阶已被证伪(τ/s 项 1e-4 量级,A3 仅 0.94→0.84%),不做 M12。
+4. scipy 精化的盆地安全性:即便从垃圾初值(fx 8597)出发 refine 也把 cam1 拽回
+   全绿(A1 0.0132/A3 0.213%),但 cam2 落 A1=0.032——精化不保证洗谷,第二遍 cv2
+   拟合才是确定性修法;refine 从好盆地出发的稳定性由追加测试锁定。
+
+### 追加任务
+
+8. solve.py:M8 路径两遍拟合(fresh → RAT|GUESS 自再拟合),solver_meta 记录两遍
+   cv RMS;M2 路径零改动;合成「退化谷」测试(guess=爆炸系数解 → 两遍后 A1 口径转绿)
+9. diagnostics.py:A3 切片重拟合当模型为 M8(D 长 8)时冻结 D;M2 不变;A3 单测补
+   M8 冻结协议断言(合成数据)
+10. 生产重跑 intrinsic:两相机体检必须 reliable 全绿、fx 落 2037±1% 邻域、退出码 0
+11. 生产重跑 stereo:闸门不动,SC3 预期 ≪5mm;散布离群对走 exclude_pairs(≤2 轮留痕)
+12. SUMMARY.md 补追加轮数值表与偏差;deferred-items cam2 决策项关闭(引用本节)
+
+阈值/闸门/体检判定规则仍然一律不动。
 
 # Quick Task: 产线支持 M8 rational 畸变模型 + Phase 2 重标 + Phase 3 重跑
 

@@ -60,16 +60,27 @@
   A1/A3;A4 升阶 rational8 探针 cam1 fx 跳变 11.19%、cam2 0.74%,说明 M2 的
   fx 存在系统性虚高,标量 RMS 看不出)。体检已 fail-closed 拦截内参进入
   双目标定(明细见 `output/intrinsic/report.md` 体检表格)。
-- **待办销账状态(2026-10-24,quick 261024-rational8-production):**
+- **待办销账状态(2026-10-24,quick 261024-rational8-production;追加轮更新):**
   1. 产线支持 rational8 畸变模型 → **完成**(M8 全链一等公民,提交
      6d570ac/fc2d7f7/63023fc,270 测试,契约只增不改);
-  2. rational8 重标内参 → **部分完成**:cam1 体检转绿(红灯 0,fx=2042.89
-     落参考锚点 2037±1% 带,test RMS 0.0652px);cam2 两轮证据剔除后仍红
-     A1/A3(0.0280/0.9392),fail-closed 拦停(honest-stop,见下条新登记);
-  3. Phase 3 双目重跑 → **阻塞**(前置 = cam2 内参 reliable)。
-  数值全表见 `.planning/quick/261024-rational8-production/SUMMARY.md`。
+  2. rational8 重标内参 → **完成(追加轮洗盆后)**:两相机体检 reliable
+     全绿(红检 0 项),cam1 fx=2037.04(+0.002%)/cam2 fx=2037.52
+     (+0.025%),均落参考锚点 2037±1% 带;cam2 曾在首轮 honest-stop
+     (红 A1/A3),追加轮定位为 fx-D 简并谷并以洗盆修复(见下条销账);
+  3. Phase 3 双目重跑 → **完成(追加轮)**:SC1-SC4 全过,test 距离 RMS
+     0.2001mm ≪ 5mm 阈值,baseline 798.11mm,剔除 0 对。
+  数值全表见 `.planning/quick/261024-rational8-production/SUMMARY.md` 追加轮节。
 
 ### 2026-10-24 · quick 261024-rational8-production · cam2 结构性残差(阻塞,待用户决策)
+
+> **已销账(2026-10-24,追加轮):** 根因为 fx-D 简并谷——scipy 精化在
+> rational 模型下存在第二落盆(cam2 pre_wash fx=2034.88 + 爆系数
+> D8=[1.78, 74.6, ..., 76.5, 71.3] 近相消),标量 RMS 与好盆相当故体检红灯。
+> 修法 = M8 洗盆:精化后追加一遍 `RAT|USE_INTRINSIC_GUESS` 的 cv2 拟合
+> (提交 342f1d2 两遍拟合 + 8266e3e A3 冻结协议 + 575d6cf 洗盆位置修正),
+> 重跑后 cam2 体检 reliable 全绿(A1=0.0011/A3=0.1974),fx=2037.52 落锚点。
+> 数值全表见 `.planning/quick/261024-rational8-production/SUMMARY.md` 追加轮节。
+> 原始登记保留如下,供归因过程追溯。
 
 - **现象:** cam2 在 M8 rational8 模型下体检仍判「不可靠」(红 A1=0.0280
   超阈 0.02、A3=0.9392% 超阈 0.5%):中心桶径向结构残差 ~0.028px + 外圈
@@ -90,6 +101,11 @@
   M8 下 calibrateCamera 初值逐帧评分中位 ~1.4–1.8px(M2 ~0.6px),阈值随之
   膨胀到 7–9px:cam1 首轮 27 帧 >1px 坏帧中 26 帧被剔、最轻 1 帧(1–2.9px
   带)漏网,靠手动 exclude_images 兜住。
+- **追加轮观察(2026-10-24,如实记录,未改评分):** 洗盆修的是「定稿求解」
+  落盆,不触碰循环评分——剔除循环仍走单遍 fresh cv2 初值,评分膨胀现象
+  依旧(cam1 中位 1.4332px→阈值 7.17px、cam2 1.8579px→9.29px,两机本轮
+  自动剔除 0 帧)。本轮 0 实际影响:数据脏帧已在上一轮由证据驱动剔除 +
+  手动清单兜住。登记不变,待后续独立任务修。
 - **不修的理由:** 验收中途不改管线循环语义(行为变更需独立验证);本任务
   已用设计内通道(手动剔除清单)达成 cam1 转绿。
 - **修法建议(后续):** 循环评分改用精化后逐帧 RMS(每轮 scipy 精化后再
