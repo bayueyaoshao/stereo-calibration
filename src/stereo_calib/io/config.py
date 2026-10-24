@@ -31,6 +31,10 @@ _ALLOWED_REFINE_METHODS = {"trf"}
 # fc_prior = fc + Tikhonov 先验(f/c 相对偏差);full_prior = 全内参放开 + 先验
 _ALLOWED_JOINT_VARIANTS = {"fc", "fc_prior", "full_prior"}
 
+# 畸变模型白名单(2026-10-24 增补):M2 = 五参 Brown-Conrady(legacy);
+# M8 = rational 8(本相机实测充分,体检对照),布局见 intrinsic.models
+_ALLOWED_DISTORTION_MODELS = {"M2", "M8"}
+
 
 @dataclass(frozen=True)
 class BoardSpec:
@@ -152,8 +156,14 @@ class IntrinsicDiagnosticsConfig:
 
 @dataclass(frozen=True)
 class IntrinsicConfig:
-    """模块2 内参标定段:精化 / 离群剔除 / test 阈值 / 手动剔除清单。"""
+    """模块2 内参标定段:畸变模型 / 精化 / 离群剔除 / test 阈值 / 手动剔除清单。
 
+    distortion_model 选畸变布局("M2" 五参 Brown-Conrady,legacy;
+    "M8" rational 8——本相机 8mm C-mount 4MP 实测充分,2026-10-24 增补),
+    默认 "M2" 保持旧配置行为零改动。
+    """
+
+    distortion_model: str = "M2"
     refine: RefineConfig = field(default_factory=RefineConfig)
     outlier: OutlierConfig = field(default_factory=OutlierConfig)
     diagnostics: IntrinsicDiagnosticsConfig = field(
@@ -536,6 +546,14 @@ def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
     """解析 intrinsic 段(模块2 全部算法参数/开关,CLI 零算法参数)。"""
     section = _check_is_dict(raw.get("intrinsic", {}), "intrinsic")
 
+    model = section.get("distortion_model", IntrinsicConfig.distortion_model)
+    # 先判 str 再做集合成员检查:容器型 yaml 值(如 [M8])不可哈希,
+    # 直接 in set 会抛 TypeError(unhashable)击穿 CLI 异常网(WR-01)
+    if not isinstance(model, str) or model not in _ALLOWED_DISTORTION_MODELS:
+        _fail("intrinsic.distortion_model", model,
+              f"只能是 {' 或 '.join(sorted(_ALLOWED_DISTORTION_MODELS))}"
+              f"(M2=五参 Brown-Conrady legacy;M8=rational 8)")
+
     rms_test_max = section.get("rms_test_max", IntrinsicConfig.rms_test_max)
     if (not isinstance(rms_test_max, int | float) or isinstance(rms_test_max, bool)
             or rms_test_max <= 0):
@@ -547,7 +565,8 @@ def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
         _fail("intrinsic.exclude_images", exclude,
               "必须是一列图像编号文字(如 [20261023_154025_519359_cam1]),逐项手动逻辑剔除")
 
-    return IntrinsicConfig(refine=_parse_refine(section), outlier=_parse_outlier(section),
+    return IntrinsicConfig(distortion_model=model,
+                           refine=_parse_refine(section), outlier=_parse_outlier(section),
                            diagnostics=_parse_diagnostics(section),
                            rms_test_max=float(rms_test_max), exclude_images=tuple(exclude))
 

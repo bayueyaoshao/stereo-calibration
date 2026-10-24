@@ -1,9 +1,10 @@
 """标定求解引擎:OpenCV 初值 + scipy 精化(模块2 引擎切片,INTR-01)。
 
 移植自参考工程 calib/solve/opencv.py、calib/solve/scipy_solver.py、
-calib/solve/residuals.py(只读引用,绝不修改)。裁剪声明:本工程模型
-固定 M2 九参数,参考工程的多模型分派/注册机制一律不移植;算法与调用
-形态照搬参考工程已验证版本。
+calib/solve/residuals.py(只读引用,绝不修改)。裁剪声明:本工程不做
+参考工程的多模型分派/注册机制,畸变模型按配置走 M2(九参,flags=0)
+或 M8(rational 8,flags=CALIB_RATIONAL_MODEL)双布局,模型名只从
+config 传入(2026-10-24 增补);算法与调用形态照搬参考工程已验证版本。
 
 结构(单一数学源纪律,RESEARCH Pattern 1/3):
 - OpenCV 路径 solve_opencv:标定只当黑盒初始化器,float32 装包规则隔离
@@ -44,11 +45,11 @@ _PLATEAU_TOL = 1e-6
 class SolveResult:
     """一次求解的参数与逐视图位姿(不可变):全部数组 float64。
 
-    params (9,) 布局见 models.INTRINSIC_NAMES;rvecs/tvecs (V,3) 与输入
-    视图逐行对齐(行序契约,装载层定死,下游绝不重排);solver 如实标注
-    解的来源("opencv" 初值 | "scipy" 精化);solver_meta 留对账与收敛
-    判定依据(status/nfev/final_cost/tail_improvement/opencv_rms),
-    不静默(T-02-05)。
+    params (9,)/(12,) 布局见 models.intrinsic_names(M2/M8);rvecs/tvecs
+    (V,3) 与输入视图逐行对齐(行序契约,装载层定死,下游绝不重排);
+    solver 如实标注解的来源("opencv" 初值 | "scipy" 精化);solver_meta
+    留对账与收敛判定依据(status/nfev/final_cost/tail_improvement/
+    opencv_rms/distortion_model),不静默(T-02-05)。
     """
 
     params: np.ndarray
@@ -93,19 +94,23 @@ def _check_common_inputs(uvs, objp, image_size) -> tuple[np.ndarray, np.ndarray,
     return uvs_arr, objp_arr, (int(size[0]), int(size[1]))
 
 
-def solve_opencv(uvs, objp, image_size) -> SolveResult:
-    """OpenCV 初值路径:全 5 畸变一起估,返回"初值版"标定结果。
+def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
+    """OpenCV 初值路径:按配置的畸变模型一次估全畸变,返回"初值版"标定结果。
 
     白话:把角点观测交标定黑盒拿一份能用的起点(内参 + 每视图位姿),
     精度到初值口径为止——后续要么直接消费(精化开关关),要么交给
-    refine_scipy 精化。flags=0 即按 M2 布局一次估全 5 个畸变系数。
+    refine_scipy 精化。flags 按模型分派:M2 全 5 畸变 flags=0;M8 加
+    CALIB_RATIONAL_MODEL(不给该 flag 时 OpenCV 对 8 长布局会静默截断)。
 
     参数:
         uvs:        (V,P,2) 或逐视图 (P,2) 列表,角点像素坐标(行序契约);
         objp:       (P,3) 板系物点(Z=0 平面);
         image_size: (宽, 高) 元组——OpenCV 口径,与 numpy 图像形状的
-                    (高, 宽) 相反(Pitfall 2,写反会让 RMS 高得离谱)。
+                    (高, 宽) 相反(Pitfall 2,写反会让 RMS 高得离谱);
+        model:      "M2" | "M8"(布局见 models.intrinsic_names,默认 M2)。
     """
+    names = models.intrinsic_names(model)
+    flags = cv2.CALIB_RATIONAL_MODEL if model == "M8" else 0
     uvs_arr, objp_arr, size = _check_common_inputs(uvs, objp, image_size)
     n_views = uvs_arr.shape[0]
     n_points = uvs_arr.shape[1]
@@ -126,7 +131,7 @@ def solve_opencv(uvs, objp, image_size) -> SolveResult:
         # 第 8 个返回值 per_view 是 float32 口径的逐帧表,剔除判据与报告
         # 一律不用它(Pitfall 12),下划线接收不读。
         rms, K, D, rvecs, tvecs, _std_int, _std_ext, _per_view = cv2.calibrateCameraExtended(
-            objs32, imgs32, size, None, None, flags=0)
+            objs32, imgs32, size, None, None, flags=flags)
     except cv2.error as e:
         raise ValueError(
             f"OpenCV 标定求解失败:{n_views} 个视图,image_size={size},"
@@ -134,12 +139,25 @@ def solve_opencv(uvs, objp, image_size) -> SolveResult:
             f"请检查该批视图的分布。"
         ) from e
 
-    # 解包断言:畸变向量必须恰 5 长(防 flags 布局陷阱;M2 布局 [k1,k2,p1,p2,k3])。
-    # OpenCV 把 D 装成 (1,5) 矩阵返回,先拉平再断言。
+    # 解包断言按模型(防 flags 布局陷阱;OpenCV 把 D 装成 (1,n) 矩阵返回,先拉平):
+    # M2 恰 5 长 [k1,k2,p1,p2,k3];M8 实测(位置探针,cv2 4.14.0)在 rational
+    # flag 下返回 14 长(s1..s4/τx,τy 槽位仅在对应 flag 下非零)——断言
+    # len ≥ 8、余位全零后取前 8([k1,k2,p1,p2,k3,k4,k5,k6])。
     D = np.asarray(D, dtype=np.float64).ravel()
-    assert D.shape == (5,), (
-        f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (5,)。本工程固定全 5 畸变,"
-        f"出现此错说明求解调用被改动,请对照参考工程核查。")
+    if model == "M2":
+        assert D.shape == (5,), (
+            f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (5,)(M2 布局 {names})。"
+            f"出现此错说明求解调用被改动,请对照参考工程核查。")
+    else:
+        assert D.shape[0] >= 8, (
+            f"OpenCV 解包的畸变向量长度是 {D.shape},M8 布局 {names} 至少要 8 长。"
+            f"出现此错说明 rational flag 未生效或求解调用被改动,请核查。")
+        if D.shape[0] > 8:
+            assert bool(np.allclose(D[8:], 0.0)), (
+                f"OpenCV 解包的畸变向量是 {D.shape[0]} 长,但第 8 位之后非全零"
+                f"({D[8:]})——出现了薄棱镜/倾斜项(s1..s4/τx,τy),超出 M8 布局。"
+                f"请核查 flags 是否混入了 THIN_PRISM/TILTED 类选项。")
+        D = D[:8]
     params = np.array([K[0, 0], K[1, 1], K[0, 2], K[1, 2], *D], dtype=np.float64)
     rvecs_arr = np.asarray([np.asarray(r, dtype=np.float64).ravel() for r in rvecs],
                            dtype=np.float64).reshape(n_views, 3)
@@ -147,8 +165,8 @@ def solve_opencv(uvs, objp, image_size) -> SolveResult:
                            dtype=np.float64).reshape(n_views, 3)
     return SolveResult(
         params=params, rvecs=rvecs_arr, tvecs=tvecs_arr, solver="opencv",
-        solver_meta={"path": "calibrateCameraExtended", "flags_used": 0,
-                     "opencv_rms": float(rms)})
+        solver_meta={"path": "calibrateCameraExtended", "flags_used": int(flags),
+                     "distortion_model": model, "opencv_rms": float(rms)})
 
 
 # ---------------------------------------------------------------------------
@@ -172,17 +190,19 @@ def row_index(view: int, point: int, uv_axis: int, n_points: int) -> int:
 
 
 def pack_theta(params: np.ndarray, rvecs: np.ndarray, tvecs: np.ndarray) -> np.ndarray:
-    """内参 + 逐视图位姿 → 联合单向量 θ = [9 内参 | 视图 0 的 (ω,t) 6 个 | …]。
+    """内参 + 逐视图位姿 → 联合单向量 θ = [内参 | 视图 0 的 (ω,t) 6 个 | …]。
 
-    不做"内参/外参分块交替优化"——那等于自研优化器,收敛性质更差且实测
-    收益为零(Don't Hand-Roll)。V 视图 → 9 + 6V 维 float64。
+    内参块长度按布局分派(M2 九参 / M8 十二参);θ 总长对 6 取模的余数
+    即布局指纹(M2 ≡3、M8 ≡0),unpack_theta 按它无损解箱。不做"内参/
+    外参分块交替优化"——那等于自研优化器,收敛性质更差且实测收益为零
+    (Don't Hand-Roll)。V 视图 → 9/12 + 6V 维 float64。
     """
     arr = np.asarray(params, dtype=np.float64).ravel()
-    if arr.shape != (len(models.INTRINSIC_NAMES),):
+    if arr.shape[0] not in (9, 12):
         raise AssertionError(
-            f"参数向量形状不合:期望 ({len(models.INTRINSIC_NAMES)},)"
-            f"(布局 {models.INTRINSIC_NAMES}),实际是 {arr.shape}。"
-            f"请按 INTRINSIC_NAMES 的顺序传参,不要按位置猜。"
+            f"参数向量形状不合:期望 (9,)(布局 {models.INTRINSIC_NAMES_M2})或 "
+            f"(12,)(布局 {models.INTRINSIC_NAMES_M8}),实际拍平后是 {arr.shape}。"
+            f"请按 intrinsic_names(模型名) 的顺序传参,不要按位置猜。"
         )
     rv = np.asarray(rvecs, dtype=np.float64)
     tv = np.asarray(tvecs, dtype=np.float64)
@@ -198,17 +218,29 @@ def pack_theta(params: np.ndarray, rvecs: np.ndarray, tvecs: np.ndarray) -> np.n
 
 
 def unpack_theta(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """θ (9+6V,) → (params (9,), rvecs (V,3), tvecs (V,3));与 pack_theta 互逆。
+    """θ (9/12+6V,) → (params (9,)/(12,), rvecs (V,3), tvecs (V,3));与 pack_theta 互逆。
 
-    长度对不上任何视图数时直接中文报错——装箱与解箱必须同一布局,错位
-    在这里点名,不带病进优化器。
+    内参块长度按 θ 对 6 取模的余数无损分派(9+6V ≡ 3、12+6V ≡ 0 (mod 6));
+    长度对不上任何布局/视图数时直接中文报错——装箱与解箱必须同一布局,
+    错位在这里点名,不带病进优化器。
     """
     th = np.asarray(theta, dtype=np.float64).ravel()
-    n_params = len(models.INTRINSIC_NAMES)
-    if th.shape[0] < n_params + 6 or (th.shape[0] - n_params) % 6 != 0:
+    remainder = th.shape[0] % 6
+    if remainder == 3:
+        n_params = 9    # M2 布局:9 + 6×视图数
+    elif remainder == 0:
+        n_params = 12   # M8 布局:12 + 6×视图数
+    else:
         raise AssertionError(
-            f"θ 向量长度不合:应为 内参{n_params} + 6×视图数,实际 {th.shape[0]}"
-            f"(对不上任何视图数)。请检查 θ 是否由 pack_theta 按同一布局装出。"
+            f"θ 向量长度不合:长度 {th.shape[0]} 对不上任何布局"
+            f"(M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
+            f"请检查 θ 是否由 pack_theta 按同一布局装出。"
+        )
+    if th.shape[0] < n_params + 6:
+        raise AssertionError(
+            f"θ 向量长度不合:长度 {th.shape[0]} 对不上任何布局"
+            f"(M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
+            f"请检查 θ 是否由 pack_theta 按同一布局装出。"
         )
     n_views = (th.shape[0] - n_params) // 6
     params = th[:n_params].copy()
@@ -246,14 +278,14 @@ def make_residual_fn(objp: np.ndarray, uvs: np.ndarray):
     return residual_fn
 
 
-def _structure_positions(n_views: int, n_points: int) -> tuple[np.ndarray, np.ndarray]:
+def _structure_positions(n_views: int, n_points: int,
+                         n_params: int) -> tuple[np.ndarray, np.ndarray]:
     """全部 (行, 列) 结构位置,按 [视图0 内参块, 视图0 外参块, 视图1 …] 顺序展平。
 
-    结构事实:每残差行恰碰 9 个内参列 + 本视图 6 个外参列(nnz =
-    2·V·P·15),别视图的外参列结构为零。雅可比组装的行列下标由本函数
+    结构事实:每残差行恰碰 n_params 个内参列(M2 九列/M8 十二列)+ 本视图
+    6 个外参列,别视图的外参列结构为零。雅可比组装的行列下标由本函数
     唯一给出(残差行序同 row_index 契约,Pitfall 4 的结构性防线)。
     """
-    n_params = len(models.INTRINSIC_NAMES)
     row_template = np.arange(2 * n_points)
     col_int = np.arange(n_params)
     col_pose = np.arange(n_params, n_params + 6)
@@ -269,26 +301,28 @@ def _structure_positions(n_views: int, n_points: int) -> tuple[np.ndarray, np.nd
             np.concatenate([c.ravel() for c in cols]))
 
 
-def make_jacobian_fn(objp: np.ndarray, uvs: np.ndarray):
-    """解析稀疏雅可比工厂:callable(θ) → scipy.sparse.csr_matrix,形状 (2VP, 9+6V)。
+def make_jacobian_fn(objp: np.ndarray, uvs: np.ndarray, model: str = "M2"):
+    """解析稀疏雅可比工厂:callable(θ) → scipy.sparse.csr_matrix,
+    形状 (2VP, 9/12+6V)(内参块按 model 布局,M2 九列/M8 十二列)。
 
-    逐视图组装 (2P, 15) 块:
-    - 内参 9 列 = models.project_jacobian 的 (n,2,9) 直接 reshape——数组内存
-      布局天然就是 (u,v) 交错行序,不做任何重排;
+    逐视图组装 (2P, n_params+6) 块:
+    - 内参列 = models.project_jacobian 的 (n,2,n_params) 直接 reshape——数组
+      内存布局天然就是 (u,v) 交错行序,不做任何重排;
     - 外参 6 列 = 链式乘积 models.project_point_jacobian (n,2,3)
       · ∂Xc/∂(ω,t) (n,3,6),einsum 一次算完整个视图。dω 部分由
       models.transform_to_camera 内部经 cv2.Rodrigues 的第二返回值
       (现成雅可比)给出,严禁在本文件手写 ∂Xc/∂ω = −[Xc]× 形式——那只在
       ω=0 成立(Pitfall 7);∂t 部分为单位阵(平移逐分量直接搬)。
     COO 三元组向量化拼接后转 csr(参考实测 0.15s/次 @ 640 视图);数值
-    正确性由 θ 全维数值差分基准测试逐项锁定(相对差 < 1e-6)。
+    正确性由 θ 全维数值差分基准测试逐项锁定(相对差 < 1e-6,M2/M8 各锁)。
     """
+    names = models.intrinsic_names(model)
     objp_arr = np.asarray(objp, dtype=np.float64)
     uvs_arr = _as_view_array(uvs)
     n_views, n_points = uvs_arr.shape[0], uvs_arr.shape[1]
-    n_params = len(models.INTRINSIC_NAMES)
+    n_params = len(names)
     shape = (2 * n_views * n_points, n_params + 6 * n_views)
-    rows, cols = _structure_positions(n_views, n_points)
+    rows, cols = _structure_positions(n_views, n_points, n_params)
 
     def jacobian_fn(theta: np.ndarray) -> csr_matrix:
         params, rvecs, tvecs = unpack_theta(theta)
@@ -340,12 +374,14 @@ def _is_practically_converged(status: int, tail_improvement: float) -> bool:
     return tail_improvement < _PLATEAU_TOL
 
 
-def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineConfig) -> SolveResult:
+def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineConfig,
+                 model: str = "M2") -> SolveResult:
     """scipy 精化路径:OpenCV 初值 → 稀疏最小二乘联合精化(INTR-01)。
 
-    白话:θ = [9 内参 | 每视图 6 个位姿参数] 装成**一个**向量,交给
-    least_squares 的 trf(信赖域反射法)+ lsmr(解稀疏线性子问题)+
-    解析稀疏雅可比联合优化;不做内参/外参分块交替优化(Don't Hand-Roll)。
+    白话:θ = [内参(按 model 布局 9/12)| 每视图 6 个位姿参数] 装成
+    **一个**向量,交给 least_squares 的 trf(信赖域反射法)+ lsmr(解稀疏
+    线性子问题)+ 解析稀疏雅可比联合优化;不做内参/外参分块交替优化
+    (Don't Hand-Roll)。
 
     失败契约:非收敛**不抛异常**——判定依据全进 solver_meta(T-02-05
     不静默),由编排层消费 converged 标志决定后续;数值路径异常
@@ -357,16 +393,20 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
     参数:
         uvs / objp / image_size:与 solve_opencv 同一口径;
         init:       OpenCV 初值解(必须与 uvs 视图数一致);
-        refine_cfg: 精化开关 + method + max_nfev + 容差,全部配置控制。
+        refine_cfg: 精化开关 + method + max_nfev + 容差,全部配置控制;
+        model:      "M2" | "M8"(布局见 models.intrinsic_names,默认 M2)。
     """
+    names = models.intrinsic_names(model)
     uvs_arr, objp_arr, size = _check_common_inputs(uvs, objp, image_size)
     n_views = uvs_arr.shape[0]
-    if init.params.shape != (len(models.INTRINSIC_NAMES),) or init.rvecs.shape != (n_views, 3) \
+    if init.params.shape != (len(names),) or init.rvecs.shape != (n_views, 3) \
             or init.tvecs.shape != (n_views, 3):
         raise ValueError(
-            f"精化初值与观测不一致:params 形状 {init.params.shape},rvecs/tvecs "
+            f"精化初值与观测不一致:params 形状 {init.params.shape}(期望 "
+            f"{len(names)},布局 {names}),rvecs/tvecs "
             f"{init.rvecs.shape}/{init.tvecs.shape},而观测是 {n_views} 个视图"
-            f"(image_size={size})。初值必须来自同一批视图的 solve_opencv 结果。"
+            f"(image_size={size})。初值必须来自同一批视图、同一模型的 "
+            f"solve_opencv 结果。"
         )
 
     theta0 = pack_theta(init.params, init.rvecs, init.tvecs)
@@ -383,7 +423,7 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
 
     sol = least_squares(
         traced_residual, theta0,
-        jac=make_jacobian_fn(objp_arr, uvs_arr),
+        jac=make_jacobian_fn(objp_arr, uvs_arr, model),
         # 不传稀疏结构矩阵参数:jac 为 callable 时 scipy 对它静默忽略(传入
         # 即死计算);稀疏性利用只经"callable jac 返回 csr + tr_solver='lsmr'"
         # 这一条真实机制(见 make_jacobian_fn),不靠结构矩阵。
@@ -410,13 +450,15 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
                        solver="scipy", solver_meta=meta)
 
 
-def solve_calibration(uvs, objp, image_size, refine_cfg: RefineConfig) -> SolveResult:
+def solve_calibration(uvs, objp, image_size, refine_cfg: RefineConfig,
+                      model: str = "M2") -> SolveResult:
     """编排入口(02-03 唯一消费它):OpenCV 初值 →(配置开关)scipy 精化。
 
     refine_cfg.enabled=False 时原样返回初值解,solver 如实标 "opencv";
     True 时精化,solver 标 "scipy" 且 solver_meta 保留 opencv_rms 对账。
+    model("M2"|"M8")透传给初值与精化两条路径。
     """
-    init = solve_opencv(uvs, objp, image_size)
+    init = solve_opencv(uvs, objp, image_size, model)
     if refine_cfg.enabled:
-        return refine_scipy(uvs, objp, image_size, init, refine_cfg)
+        return refine_scipy(uvs, objp, image_size, init, refine_cfg, model)
     return init

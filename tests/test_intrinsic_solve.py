@@ -44,10 +44,14 @@ _IMAGE_SIZE = (2560, 1440)
 _TANGENT_ABS_TOL = 5.0e-5
 
 
-def _object_points() -> np.ndarray:
-    """88 个内角点的板系物点(行主序布局,与 preprocess.build_object_points 同构)。"""
-    xs = np.arange(11, dtype=np.float64) * 25.0
-    ys = np.arange(8, dtype=np.float64) * 25.0
+def _object_points(square_mm: float = 25.0) -> np.ndarray:
+    """88 个内角点的板系物点(行主序布局,与 preprocess.build_object_points 同构)。
+
+    square_mm 可放大方格边长:M8 合成场用 40mm 让板铺满同一画面,
+    拿到与真实数据同量级的 r^2 覆盖(强畸变只有铺到画面边缘才激发)。
+    """
+    xs = np.arange(11, dtype=np.float64) * square_mm
+    ys = np.arange(8, dtype=np.float64) * square_mm
     objp = np.zeros((11 * 8, 3), dtype=np.float64)
     objp[:, 0] = np.tile(xs, 8)
     objp[:, 1] = np.repeat(ys, 11)
@@ -225,7 +229,109 @@ def test_analytic_sparse_jacobian_matches_numeric_full_theta():
     assert rel < 1e-6, f"解析雅可比对 θ 全维数值差分相对差 {rel:.3e}(须 < 1e-6)"
 
 
-# ---------- 4. 源码防线:残差只经 models / Rodrigues 雅可比路线 / trf+lsmr 配置 ----------
+# ---------- 4. M8 rational 布局:flags、theta 12 参、合成真值恢复、雅可比 ----------
+
+# M8 合成真值(量级取参考工程 rational8 实测解:f~2037、num/den 有理对强径向)
+_PARAMS_M8_TRUE = np.array([2037.4, 2037.2, 1279.5, 719.6,
+                            2.7411, -1.3171, 0.0002, -0.0000, -0.4289,
+                            3.5219, -0.0652, -1.4662])
+
+
+def _synthetic_views_m8(n_views: int = 20, noise_px: float = 0.05, seed: int = 42) -> np.ndarray:
+    """M8 真值合成视图:40mm 方格板铺满 2560x1440(强畸变须铺到画面边缘才激发)。
+
+    位姿采样:转角 ~0.3rad、横向 ±30mm、深度 300–520mm;越界视图整体重采
+    (uv 全在画面内、边界留 2px、Z>80)。r^2 覆盖口径:max ~0.45、p50 ~0.12
+    (真数据 188 帧实测 max 0.364、p50 0.091,合成场略富余,覆盖判定成立)。
+    """
+    rng = np.random.default_rng(seed)
+    objp = _object_points(square_mm=40.0)
+    k = models.intrinsics_matrix(_PARAMS_M8_TRUE)
+    dist = _PARAMS_M8_TRUE[4:]
+    views = []
+    tries = 0
+    while len(views) < n_views:
+        tries += 1
+        assert tries < 2000, "位姿采样拒绝率过高,M8 合成几何假设失效"
+        rvec = rng.normal(0.0, 0.3, 3)
+        tvec = np.array([rng.normal(0.0, 30.0),
+                         rng.normal(0.0, 30.0),
+                         rng.uniform(300.0, 520.0)])
+        proj, _ = cv2.projectPoints(objp.reshape(-1, 1, 3), rvec, tvec, k, dist)
+        uv = proj.reshape(-1, 2)
+        if (uv[:, 0].min() < 2 or uv[:, 0].max() > _IMAGE_SIZE[0] - 2
+                or uv[:, 1].min() < 2 or uv[:, 1].max() > _IMAGE_SIZE[1] - 2):
+            continue
+        views.append(uv + rng.normal(0.0, noise_px, (88, 2)))
+    return np.asarray(views)
+
+
+def test_solve_calibration_m8_recovers_synthetic_truth():
+    """M8 真值 20 视图 σ0.05px → fx 相对误差 < 5e-3(plan 验收口径)、回代到噪声底。
+
+    布局契约:params (12,)、D = params[4:] 恰 8 长;初值/精化两段都锁 fx。
+    个体 k 系数在 0.05px 噪声 + 现实 r^2 覆盖下不具判别力(num/den 有理
+    分式的病态方向,噪声自由探测显示个体系数可恢复到 1e-4,噪声下漂移)——
+    生产契约是"fx 定得准 + 回代到噪声底",与产线验收同一把尺。
+    """
+    objp = _object_points(square_mm=40.0)
+    uvs = _synthetic_views_m8()
+
+    init = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig(enabled=False), model="M8")
+    assert init.solver == "opencv"
+    assert init.params.shape == (12,)
+    assert init.solver_meta["distortion_model"] == "M8", "solver_meta 须标注畸变模型"
+    assert init.solver_meta["flags_used"] == int(cv2.CALIB_RATIONAL_MODEL), (
+        "M8 必须带 rational flag(缺它 OpenCV 对 8 长布局静默截断)")
+    fx_rel_init = abs(init.params[0] - _PARAMS_M8_TRUE[0]) / _PARAMS_M8_TRUE[0]
+    assert fx_rel_init < 5e-3, f"M8 初值 fx 相对误差 {fx_rel_init:.3e}(须 < 5e-3)"
+
+    result = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig(), model="M8")
+    assert result.solver == "scipy"
+    assert result.params.shape == (12,)
+    assert result.params[4:].shape == (8,), "M8 布局 D 必须恰 8 长"
+    fx_rel = abs(result.params[0] - _PARAMS_M8_TRUE[0]) / _PARAMS_M8_TRUE[0]
+    assert fx_rel < 5e-3, f"M8 精化后 fx 相对误差 {fx_rel:.3e}(须 < 5e-3)"
+
+    m = compute_metrics(objp, uvs, result.params, result.rvecs, result.tvecs)
+    assert m.rms_overall < 0.2, f"M8 精化后回代 RMS {m.rms_overall:.4f}px(须 < 0.2)"
+    assert result.solver_meta["converged"] is True, (
+        f"实用收敛判定须为 True(meta={result.solver_meta})")
+
+
+def test_pack_unpack_theta_m8_roundtrip():
+    """M8 十二参布局 θ 装箱/解箱互逆(12+6V ≡ 0 (mod 6) 布局指纹分派)。"""
+    objp = _object_points(square_mm=40.0)
+    uvs = _synthetic_views_m8(n_views=3)
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE, model="M8")
+    theta = pack_theta(init.params, init.rvecs, init.tvecs)
+    assert theta.shape == (12 + 6 * 3,)
+    params, rvecs, tvecs = unpack_theta(theta)
+    assert np.array_equal(params, init.params)
+    assert np.array_equal(rvecs, init.rvecs)
+    assert np.array_equal(tvecs, init.tvecs)
+
+
+def test_analytic_sparse_jacobian_matches_numeric_full_theta_m8():
+    """M8 十二列布局:解析雅可比对 θ 全维数值差分逐项一致(相对差 < 1e-6)。
+
+    锁内参块 12 列与 intrinsic_names("M8") 的列序对齐(den 列 k4,k5,k6
+    的解析导数含 −num·r^(2j)/den² 项,是 M8 新增自由度,错位在此爆炸)。
+    """
+    objp = _object_points(square_mm=40.0)
+    uvs = _synthetic_views_m8(n_views=2, seed=13)
+    init = solve_opencv(uvs, objp, _IMAGE_SIZE, model="M8")
+    theta0 = pack_theta(init.params, init.rvecs, init.tvecs)
+
+    jac_num = approx_derivative(make_residual_fn(objp, uvs), theta0.copy(), method="3-point")
+    jac_ana = make_jacobian_fn(objp, uvs, model="M8")(theta0).toarray()
+    assert jac_ana.shape == (2 * 2 * 88, 12 + 6 * 2)
+    scale = max(float(np.abs(jac_num).max()), 1e-30)
+    rel = float(np.abs(jac_ana - jac_num).max()) / scale
+    assert rel < 1e-6, f"M8 解析雅可比对数值差分相对差 {rel:.3e}(须 < 1e-6)"
+
+
+# ---------- 5. 源码防线:残差只经 models / Rodrigues 雅可比路线 / trf+lsmr 配置 ----------
 
 def test_solve_source_guard_models_only_math():
     """solve.py 源文防线:无第二份投影/畸变公式;domega 走 Rodrigues 现成雅可比。

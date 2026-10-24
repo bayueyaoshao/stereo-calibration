@@ -36,6 +36,7 @@ preprocess:
   copy_fail_originals: true
   visualization: {jpeg_quality: 90}
 intrinsic:
+  distortion_model: "M2"
   refine:
     enabled: true
     method: "trf"
@@ -79,6 +80,7 @@ def _mutate(field: str, value: str) -> str:
 def test_load_intrinsic_all_fields(tmp_path):
     """合法配置加载:intrinsic 段每个键都解析到对应字段(含嵌套 refine/outlier)。"""
     cfg = load_config(_write_config(tmp_path, MINIMAL_YAML))
+    assert cfg.intrinsic.distortion_model == "M2"
     assert cfg.intrinsic.refine.enabled is True
     assert cfg.intrinsic.refine.method == "trf"
     assert cfg.intrinsic.refine.max_nfev == 300
@@ -104,11 +106,29 @@ def test_load_intrinsic_all_fields(tmp_path):
         ("ftol", "0"),                    # 收敛容差必须 > 0
         ("max_iterations", "true"),       # 布尔冒充 int 必须被拦
         ("exclude_images", "cam1_001"),   # 裸字符串不是 list,必须被拦
+        ("distortion_model", '"M1"'),     # 白名单外的模型名(只收 M2/M8)
+        ("distortion_model", '"m8"'),     # 大小写敏感,白名单精确匹配
+        ("distortion_model", "8"),        # int 冒充模型名必须被拦
+        ("distortion_model", "[M2]"),     # 容器型值必须被拦(WR-01,不抛 TypeError)
     ],
 )
 def test_invalid_values_raise_with_chinese_message(tmp_path, field, bad_value):
     with pytest.raises(ValueError, match="不合法"):
         load_config(_write_config(tmp_path, _mutate(field, bad_value)))
+
+
+def test_distortion_model_m8_parsed(tmp_path):
+    """distortion_model: "M8" 合法加载(白名单第二成员,产线 M8 增补入口)。"""
+    cfg = load_config(_write_config(tmp_path, _mutate("distortion_model", '"M8"')))
+    assert cfg.intrinsic.distortion_model == "M8"
+
+
+def test_distortion_model_absent_defaults_to_m2(tmp_path):
+    """旧配置(无 distortion_model 键)不炸:默认 M2(契约只增不改,向后兼容)。"""
+    lines = [ln for ln in MINIMAL_YAML.splitlines()
+             if not ln.strip().startswith("distortion_model:")]
+    cfg = load_config(_write_config(tmp_path, "\n".join(lines) + "\n"))
+    assert cfg.intrinsic.distortion_model == "M2"
 
 
 def test_missing_intrinsic_section_falls_back_to_defaults(tmp_path):

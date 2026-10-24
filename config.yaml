@@ -48,8 +48,12 @@ preprocess:
   visualization:
     jpeg_quality: 90                   # 角点标注图 JPEG 质量(01-03 接入)
 
-# ---- 模块2:单相机内参标定(M2 模型:OpenCV 初值 + scipy 精化 + 离群剔除)----
+# ---- 模块2:单相机内参标定(OpenCV 初值 + scipy 精化 + 离群剔除 + 模型体检)----
 intrinsic:
+  distortion_model: "M8"               # 畸变模型布局:M2 = 五参 Brown-Conrady(legacy,
+                                       # 本相机实测欠拟合——体检 fail-closed 拦截的根因);
+                                       # M8 = rational 8(D=[k1,k2,p1,p2,k3,k4,k5,k6],
+                                       # 2026-10-24 增补,本相机实测充分)
   refine:
     enabled: true                      # OpenCV 初值之后是否做 scipy 联合精化(算法开关全部配置控制)
     method: "trf"                      # least_squares 求解方法,只收 trf('lm' 只支持稠密雅可比,拒收防呆)
