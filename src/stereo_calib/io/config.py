@@ -126,11 +126,38 @@ class OutlierConfig:
 
 
 @dataclass(frozen=True)
+class IntrinsicDiagnosticsConfig:
+    """模块2 内参模型充分性体检段:四个检查的红线阈值 + verdict 判定规则。
+
+    背景(2026-10-24 根因):M2 五参畸变模型对本相机欠拟合时,标量重投影
+    RMS 看不出来(每帧自由位姿 + fx 会吸收模型误差)。体检用四个仅凭自家
+    数据 + 自家结果的检查揪出这类问题,任意两项红灯即判「内参不可靠」
+    (fail-closed,禁止消费该内参进入双目标定):
+      A0 残差能量:    PnP 逐点池化 RMS / 中心桶噪声底,比值上限(倍);
+      A1 残差径向结构:按归一化半径 5 桶的径向分量桶均值绝对值上限(px);
+      A3 切片 fx 稳定性:6 切片重标 fx 极差上限(%),单切片最少帧数下限;
+      A4 模型阶次探针:升阶 rational8 重标的 fx 跳变上限(%)。
+    阈值依据:rational8 对照实测通过值(A1 0.0035 / A3 0.32 / A0 ~1)留
+    3~5× 裕量。A2 去畸变直线度仅报告不判红(实测无分辨力)。
+    """
+
+    enabled: bool = True
+    a0_max_ratio: float = 2.0
+    a1_max_bin_mean_px: float = 0.02
+    a3_max_fx_range_pct: float = 0.5
+    a3_min_frames: int = 20
+    a4_max_fx_jump_pct: float = 2.0
+    min_red_count: int = 2
+
+
+@dataclass(frozen=True)
 class IntrinsicConfig:
     """模块2 内参标定段:精化 / 离群剔除 / test 阈值 / 手动剔除清单。"""
 
     refine: RefineConfig = field(default_factory=RefineConfig)
     outlier: OutlierConfig = field(default_factory=OutlierConfig)
+    diagnostics: IntrinsicDiagnosticsConfig = field(
+        default_factory=IntrinsicDiagnosticsConfig)
     rms_test_max: float = 1.0
     exclude_images: tuple[str, ...] = ()
 
@@ -451,6 +478,60 @@ def _parse_outlier(raw: dict) -> OutlierConfig:
                          max_iterations=max_iterations, min_views=min_views)
 
 
+def _parse_diagnostics(raw: dict) -> IntrinsicDiagnosticsConfig:
+    """解析 intrinsic.diagnostics 段:体检总开关 + 四检查红线阈值 + verdict 规则。"""
+    cfg = IntrinsicDiagnosticsConfig()
+    section = _check_is_dict(raw.get("diagnostics", {}), "intrinsic.diagnostics")
+
+    enabled = section.get("enabled", cfg.enabled)
+    if not isinstance(enabled, bool):
+        _fail("intrinsic.diagnostics.enabled", enabled,
+              "必须是 true 或 false(是否在标定完成后做模型充分性体检)")
+
+    a0_max_ratio = section.get("a0_max_ratio", cfg.a0_max_ratio)
+    if (not isinstance(a0_max_ratio, int | float) or isinstance(a0_max_ratio, bool)
+            or a0_max_ratio <= 1.0):
+        _fail("intrinsic.diagnostics.a0_max_ratio", a0_max_ratio,
+              "必须是 > 1.0 的数(A0 红:池化 RMS / 中心桶噪声底 的倍数上限;≤1 无判别力)")
+
+    a1_max_bin_mean = section.get("a1_max_bin_mean_px", cfg.a1_max_bin_mean_px)
+    if (not isinstance(a1_max_bin_mean, int | float) or isinstance(a1_max_bin_mean, bool)
+            or a1_max_bin_mean <= 0):
+        _fail("intrinsic.diagnostics.a1_max_bin_mean_px", a1_max_bin_mean,
+              "必须是 > 0 的数(A1 红:径向分量桶均值绝对值上限,像素)")
+
+    a3_max_fx_range = section.get("a3_max_fx_range_pct", cfg.a3_max_fx_range_pct)
+    if (not isinstance(a3_max_fx_range, int | float) or isinstance(a3_max_fx_range, bool)
+            or a3_max_fx_range <= 0):
+        _fail("intrinsic.diagnostics.a3_max_fx_range_pct", a3_max_fx_range,
+              "必须是 > 0 的数(A3 红:切片重标 fx 极差上限,%)")
+
+    a3_min_frames = section.get("a3_min_frames", cfg.a3_min_frames)
+    if (not isinstance(a3_min_frames, int) or isinstance(a3_min_frames, bool)
+            or a3_min_frames < 1):
+        _fail("intrinsic.diagnostics.a3_min_frames", a3_min_frames,
+              "必须是 >= 1 的整数(A3 单切片最少帧数,低于则跳过该切片)")
+
+    a4_max_fx_jump = section.get("a4_max_fx_jump_pct", cfg.a4_max_fx_jump_pct)
+    if (not isinstance(a4_max_fx_jump, int | float) or isinstance(a4_max_fx_jump, bool)
+            or a4_max_fx_jump <= 0):
+        _fail("intrinsic.diagnostics.a4_max_fx_jump_pct", a4_max_fx_jump,
+              "必须是 > 0 的数(A4 红:升阶 rational8 重标的 fx 跳变上限,%)")
+
+    min_red_count = section.get("min_red_count", cfg.min_red_count)
+    if (not isinstance(min_red_count, int) or isinstance(min_red_count, bool)
+            or not 1 <= min_red_count <= 4):
+        _fail("intrinsic.diagnostics.min_red_count", min_red_count,
+              "必须是 1 到 4 之间的整数(verdict 判不可靠所需最少红灯数;"
+              "红检只有 A0/A1/A3/A4 四个,>4 永远判不可达)")
+
+    return IntrinsicDiagnosticsConfig(
+        enabled=enabled, a0_max_ratio=float(a0_max_ratio),
+        a1_max_bin_mean_px=float(a1_max_bin_mean),
+        a3_max_fx_range_pct=float(a3_max_fx_range), a3_min_frames=a3_min_frames,
+        a4_max_fx_jump_pct=float(a4_max_fx_jump), min_red_count=min_red_count)
+
+
 def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
     """解析 intrinsic 段(模块2 全部算法参数/开关,CLI 零算法参数)。"""
     section = _check_is_dict(raw.get("intrinsic", {}), "intrinsic")
@@ -467,6 +548,7 @@ def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
               "必须是一列图像编号文字(如 [20261023_154025_519359_cam1]),逐项手动逻辑剔除")
 
     return IntrinsicConfig(refine=_parse_refine(section), outlier=_parse_outlier(section),
+                           diagnostics=_parse_diagnostics(section),
                            rms_test_max=float(rms_test_max), exclude_images=tuple(exclude))
 
 
