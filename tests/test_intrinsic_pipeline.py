@@ -231,23 +231,27 @@ def test_metrics_and_observation_source_guards():
 # ===========================================================================
 
 # intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
+# 2026-10-24 增补 "diagnostics"(模型充分性体检),契约只增不改既有字段
 _JSON_KEYS = {
     "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
     "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
-    "dropped_frames", "solver_meta", "board", "config_snapshot",
+    "dropped_frames", "solver_meta", "board", "config_snapshot", "diagnostics",
 }
 
 
 def test_write_intrinsics_json_roundtrip(tmp_path):
     """写 → 读回逐字段断言:字段全集、params 按名、K/D 形状与数值冗余一致。"""
     dropped = [{"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
+    diagnostics = {"enabled": True, "verdict": "可靠", "reliable": True,
+                   "red_count": 0, "red_names": [], "notes": [], "checks": []}
     out = write_intrinsics_json(
         tmp_path / "cam1" / "intrinsics.json", cam=1, image_size=(2560, 1440),
         params=_TRUE_PARAMS, K=intrinsics_matrix(_TRUE_PARAMS), D=_TRUE_PARAMS[4:9],
         solver="scipy", refine_enabled=True, rms_train_overall=0.3316,
         rms_test_overall=0.2389, n_views_train=141, n_views_test=15,
         dropped_frames=dropped, solver_meta={"status": 0, "opencv_rms": 2.5782},
-        board=BoardSpec(), config_snapshot={"intrinsic": {"rms_test_max": 1.0}})
+        board=BoardSpec(), config_snapshot={"intrinsic": {"rms_test_max": 1.0}},
+        diagnostics=diagnostics)
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert set(payload) == _JSON_KEYS, "intrinsics.json 字段集必须与 Pattern 7 契约全等"
     assert list(payload["params"]) == list(INTRINSIC_NAMES), "params 必须按名(模块 3 的固定接口)"
@@ -266,6 +270,7 @@ def test_write_intrinsics_json_roundtrip(tmp_path):
         {"image_id": "003_cam1", "rms": 15.2, "round": 1, "threshold": 0.35}]
     assert payload["solver_meta"]["opencv_rms"] == pytest.approx(2.5782)
     assert payload["board"]["cols"] == 11 and payload["board"]["square_size_mm"] == 25.0
+    assert payload["diagnostics"] == diagnostics, "diagnostics 键必须原样落盘(只增契约)"
 
 
 def test_write_residuals_npz_roundtrip(tmp_path):

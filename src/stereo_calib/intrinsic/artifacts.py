@@ -40,10 +40,11 @@ from stereo_calib.io.config import BoardSpec
 _PER_FRAME_FIELDS = ["image_id", "split", "source", "rms", "dropped", "note"]
 
 # intrinsics.json 顶层字段全集(Pattern 7 契约;Phase 3 按名读取的唯一接口)
+# 2026-10-24 增补 "diagnostics"(模型充分性体检,只增不改既有字段)
 _INTRINSICS_JSON_KEYS = (
     "cam", "image_size", "params", "K", "D", "solver", "refine_enabled",
     "rms_train_overall", "rms_test_overall", "n_views_train", "n_views_test",
-    "dropped_frames", "solver_meta", "board", "config_snapshot",
+    "dropped_frames", "solver_meta", "board", "config_snapshot", "diagnostics",
 )
 
 
@@ -61,10 +62,12 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
                           rms_train_overall: float, rms_test_overall: float,
                           n_views_train: int, n_views_test: int,
                           dropped_frames: list[dict], solver_meta: dict,
-                          board: BoardSpec, config_snapshot: dict) -> Path:
+                          board: BoardSpec, config_snapshot: dict,
+                          diagnostics: dict) -> Path:
     """写一路相机的内参契约文件(Pattern 7,模块 3 的唯一固定内参输入)。
 
-    字段层级(与 RESEARCH Pattern 7 逐字段一致):
+    字段层级(与 RESEARCH Pattern 7 逐字段一致;2026-10-24 增补 diagnostics,
+    只增不改既有字段):
         cam:               相机号(int);
         image_size:        [宽, 高],与标定同源口径;
         params:            九参数按名(fx/fy/cx/cy/k1/k2/p1/p2/k3);
@@ -77,7 +80,9 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
         dropped_frames:    [{"image_id", "rms", "round", "threshold"}, …]
                            自动剔除留痕(T-02-08 可审计);
         solver_meta:       status/nfev/opencv_rms 等对账信息,不静默;
-        board:             棋盘规格快照;config_snapshot:intrinsic 段快照。
+        board:             棋盘规格快照;config_snapshot:intrinsic 段快照;
+        diagnostics:       模型充分性体检报告(各检查数值/阈值/red/notes/
+                           verdict/red_count/enabled,JSON 可序列化 dict)。
     """
     d_arr = np.asarray(D, dtype=np.float64).ravel()
     assert d_arr.shape == (5,), (
@@ -103,6 +108,7 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
         "solver_meta": solver_meta,
         "board": asdict(board),
         "config_snapshot": config_snapshot,
+        "diagnostics": diagnostics,
     }
     assert set(payload) == set(_INTRINSICS_JSON_KEYS), (
         f"intrinsics.json 字段集漂移:实际 {sorted(payload)},契约 {sorted(_INTRINSICS_JSON_KEYS)}。"
@@ -173,6 +179,63 @@ def _fmt_rms(v: float) -> str:
     return f"{v:.4f}" if np.isfinite(v) else "NaN"
 
 
+def _fmt_diag_value(v: float | None) -> str:
+    """体检判定量显示:None(数据不足/探针失败)显式标注,不冒充数值。"""
+    return "数据不足" if v is None else f"{v:.4f}"
+
+
+def _render_diagnostics_section(lines: list[str], per_cam_summaries: list[dict],
+                                config_snapshot: dict) -> None:
+    """模型充分性体检小节:判定规则一行 + 逐检查数值表格 + verdict(留痕)。
+
+    判「不可靠」的相机以 **FAIL ⚠** 醒目标红;体检未启用/该路失败的相机
+    如实注明,不编造体检结果。diagnostics 结构来自编排层
+    diagnostics_to_dict(enabled/verdict/reliable/red_count/red_names/
+    notes/checks[name,label,value,threshold,red,note])。
+    """
+    lines.append("## 模型充分性体检")
+    lines.append("")
+    snap = config_snapshot.get("intrinsic", {}).get("diagnostics", {}) \
+        if isinstance(config_snapshot, dict) else {}
+    min_red = snap.get("min_red_count") if isinstance(snap, dict) else None
+    rule = f"A0/A1/A3/A4 任意 {min_red} 项" if min_red is not None \
+        else "A0/A1/A3/A4 红灯数达 min_red_count"
+    lines.append(f"判定规则:{rule}红灯 → 判「内参不可靠」(fail-closed:禁止消费该内参"
+                 "进入双目标定);A2 去畸变直线度仅报告不判红。")
+    lines.append("")
+    for s in per_cam_summaries:
+        d = s.get("diagnostics")
+        if d is None:
+            reason = "该路标定失败" if s.get("failed") else "体检未运行"
+            lines.append(f"- cam{s['cam']}:无体检结果({reason})。")
+            continue
+        if not d.get("enabled", False):
+            lines.append(f"- cam{s['cam']}:体检未启用(diagnostics.enabled: false),"
+                         "内参可靠性未判定。")
+            continue
+        lines.append(f"**cam{s['cam']}**")
+        lines.append("")
+        lines.append("| 检查 | 判定量 | 阈值 | 结果 | 说明 |")
+        lines.append("|---|---|---|---|---|")
+        for c in d["checks"]:
+            thr = "-" if c["threshold"] is None else f"{c['threshold']:.4g}"
+            result = "红灯" if c["red"] else "通过"
+            note = c["note"] if c["name"] != "A2" or c["note"] else ""
+            lines.append(f"| {c['name']} {c['label']} | {_fmt_diag_value(c['value'])} | "
+                         f"{thr} | {result} | {note} |")
+        lines.append("")
+        if d.get("reliable"):
+            lines.append(f"- cam{s['cam']} 体检结论:PASS 可靠(红灯 {d['red_count']} 项,"
+                         "低于判定线)")
+        else:
+            names = ",".join(d["red_names"]) or "未命名"
+            lines.append(f"- cam{s['cam']} 体检结论:**FAIL ⚠ 不可靠(红灯 {names} "
+                         f"共 {d['red_count']} 项)——畸变模型不充分,内参不可靠**")
+        for n in d["notes"]:
+            lines.append(f"  - {n}")
+        lines.append("")
+
+
 def write_report_md(path: Path | str, per_cam_summaries: list[dict],
                     rms_test_max: float, config_snapshot: dict) -> Path:
     """写单份总报告(两路并排对比,INTR-04;f-string markdown,零模板引擎)。
@@ -182,7 +245,9 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
         rms_train_overall / rms_test_overall /
         n_views_train(幸存)/ n_views_train_initial / n_views_test /
         dropped_frames / outlier_loop(剔除循环结束原因,含保险丝触发说明)/
-        train_per_view_rms / test_per_view_rms(逐帧清单,NaN 表示失败帧)。
+        train_per_view_rms / test_per_view_rms(逐帧清单,NaN 表示失败帧)/
+        diagnostics(模型充分性体检 dict,diagnostics_to_dict 产出;
+        失败路无此键)。
 
     整路失败记录(编排层单路失败收口组装)只带 cam / failed=True / error
     与中性空字段:指标表按 FAIL 渲染,失败留痕节写明病因,参数表只列
@@ -249,6 +314,9 @@ def write_report_md(path: Path | str, per_cam_summaries: list[dict],
             f"cam{s['cam']} solver={s['solver']}(refine={'开' if s['refine_enabled'] else '关'})"
             for s in ok_cams))
         lines.append("")
+
+    # ---- 模型充分性体检:畸变模型是否充分(fail-closed 判定留痕)----
+    _render_diagnostics_section(lines, per_cam_summaries, config_snapshot)
 
     # ---- 离群帧表:自动剔除留痕(可审计,T-02-08)----
     lines.append("## 离群帧(自动剔除留痕)")

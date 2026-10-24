@@ -2,8 +2,8 @@
 只估位姿评分 → 五类产物落盘 → 中文汇总(OVERNIGHT AUTONOMY 机制落地)。
 
 流程(run_intrinsic 是本模块唯一编排入口,零数学——只调用 02-01/02-02
-的 observation / solve / scoring / metrics 入口与 artifacts 落盘,投影与
-畸变公式只存在于 models.py,本文件一个公式都不出现):
+的 observation / solve / scoring / metrics 入口、diagnostics 体检入口与
+artifacts 落盘,投影与畸变公式只存在于 models.py,本文件一个公式都不出现):
 
 运行前清理 output_root/intrinsic → 每路相机串行:
   1. 装载 train/test 幸存视图(load_views:检出过滤 + 手动剔除清单);
@@ -13,11 +13,15 @@
      幸存集中位数 → 超阈剔除;min_views / max_drop_fraction /
      max_iterations 三保险丝,触发如实记入报告,绝不静默;
   3. 幸存集定稿:solve_calibration(精化开关由配置生效)→ 回代指标;
-  4. test 逐帧 score_pose_only(内参当尺子只估位姿;单帧失败 NaN + 中文
+  4. 模型充分性体检(diagnostics.run_battery,2026-10-24 接入):标量
+     RMS 看不出的畸变模型欠拟合由 A0/A1/A3/A4 揪出,数值/判定进
+     intrinsics.json 的 diagnostics 键与 report.md 体检节;
+  5. test 逐帧 score_pose_only(内参当尺子只估位姿;单帧失败 NaN + 中文
      备注不中断;全部失败属环境异常,中文报错不静默产出 NaN 报告);
-  5. 落盘:intrinsics.json / 残差 npz×2 / 外参 npz / 逐帧 CSV。
-两路完成后写单份 report.md(两路对比 + 离群留痕)→ 中文汇总 + 产物
-绝对路径清单。
+  6. 落盘:intrinsics.json / 残差 npz×2 / 外参 npz / 逐帧 CSV。
+两路完成后写单份 report.md(两路对比 + 体检 + 离群留痕)→ 中文汇总 →
+**fail-closed 闸门**:任一路体检判「不可靠」抛中文 RuntimeError(产物
+已落盘留痕),由 CLI 异常网收口为「内参标定失败」退出码 1。
 
 数据安全(T-02-07):全部写路径仅从 cfg.output_root 派生;rmtree 目标仅
 output_root/intrinsic 一个产物子目录。安全前提(不重复实现):load_config
@@ -46,6 +50,7 @@ from stereo_calib.intrinsic.artifacts import (
     write_report_md,
     write_residuals_npz,
 )
+from stereo_calib.intrinsic.diagnostics import diagnostics_to_dict, run_battery
 from stereo_calib.intrinsic.metrics import compute_metrics
 from stereo_calib.intrinsic.models import INTRINSIC_NAMES, intrinsics_matrix
 from stereo_calib.intrinsic.observation import load_views
@@ -173,6 +178,24 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
     m_final = compute_metrics(train.objp, uvs_train, final.params, final.rvecs, final.tvecs)
     typer.echo(f"cam{cam}:train 幸存集回代 RMS {m_final.rms_overall:.4f}px(solver={final.solver})")
 
+    # ---- 模型充分性体检(fail-closed 闸门,2026-10-24 接入)----
+    # 标量 RMS 看不出的畸变模型欠拟合(如 fx 被推高 11%)由 A0/A1/A3/A4
+    # 揪出;数值与判定进 intrinsics.json 的 diagnostics 键(契约只增)与
+    # report.md 体检节。verdict 在 run_intrinsic 收口(两路齐后再判)。
+    diag_report = run_battery(uvs_train, train.objp,
+                              intrinsics_matrix(final.params),
+                              np.asarray(final.params[4:9], dtype=np.float64),
+                              train.image_size, cfg.intrinsic.diagnostics)
+    diagnostics = diagnostics_to_dict(diag_report)
+    for chk in diag_report.checks:
+        value = "数据不足" if chk.value is None else f"{chk.value:.4f}"
+        state = "红灯" if chk.red else "通过"
+        typer.echo(f"    体检 {chk.name} {chk.label}:{value}"
+                   f"{'(阈值 ' + format(chk.threshold, 'g') + ')' if chk.threshold is not None else ''}"
+                   f" → {state}")
+    typer.echo(f"cam{cam}:体检 verdict={diag_report.verdict}"
+               f"(红灯 {diag_report.red_count} 项:{','.join(diag_report.red_names) or '无'})")
+
     # ---- test 评分(内参当尺子,只估位姿)----
     typer.echo(f"cam{cam}:test {len(test.image_ids)} 帧只估位姿评分……")
     rms_test_overall, test_residuals, test_per_view_rms, test_notes = \
@@ -210,7 +233,8 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
         rms_train_overall=m_final.rms_overall, rms_test_overall=rms_test_overall,
         n_views_train=len(keep), n_views_test=len(test.image_ids),
         dropped_frames=dropped, solver_meta=final.solver_meta,
-        board=cfg.board, config_snapshot={"intrinsic": asdict(cfg.intrinsic)})
+        board=cfg.board, config_snapshot={"intrinsic": asdict(cfg.intrinsic)},
+        diagnostics=diagnostics)
     train_res_path = write_residuals_npz(
         cam_dir / "train_residuals.npz", kept_ids, m_final.residuals, m_final.per_view_rms)
     test_res_path = write_residuals_npz(
@@ -233,6 +257,7 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
         "outlier_loop": loop_note,
         "train_per_view_rms": [float(v) for v in m_final.per_view_rms],
         "test_per_view_rms": [float(v) for v in test_per_view_rms],
+        "diagnostics": diagnostics,
     }
     artifacts = [json_path, train_res_path, test_res_path, extr_path, csv_path]
     return summary, artifacts
@@ -300,6 +325,12 @@ def run_intrinsic(cfg: StereoCalibConfig) -> None:
                    f"test RMS {s['rms_test_overall']:.4f}px(阈值 {cfg.intrinsic.rms_test_max},{verdict}),"
                    f"train 幸存 {s['n_views_train']}/{s['n_views_train_initial']} 帧"
                    f"(剔除 {len(s['dropped_frames'])} 帧),test {s['n_views_test']} 帧")
+        d = s.get("diagnostics") or {}
+        if d.get("enabled"):
+            typer.echo(f"    体检:{d['verdict']}(红灯 {d['red_count']} 项:"
+                       f"{','.join(d['red_names']) or '无'})")
+        else:
+            typer.echo("    体检:未启用(内参可靠性未判定)")
         if s["dropped_frames"]:
             for d in s["dropped_frames"]:
                 typer.echo(f"    剔除留痕:cam{s['cam']} {d['image_id']} 第 {d['round']} 轮,"
@@ -308,3 +339,18 @@ def run_intrinsic(cfg: StereoCalibConfig) -> None:
     typer.echo("  全部产物(绝对路径):")
     for p in artifacts:
         typer.echo(f"    {Path(p).resolve()}")
+
+    # ---- fail-closed 闸门(2026-10-24):任一路体检判「不可靠」→ 中文
+    #      RuntimeError,由 CLI 异常网收口为「内参标定失败」退出码 1。此刻
+    #      intrinsics.json/report.md 已全部落盘留痕——与双目防线同风格:
+    #      产物诚实留痕 + 非零退出,绝不让不可靠内参静默流入双目标定。
+    bad = [(s, s["diagnostics"]) for s in summaries
+           if (s.get("diagnostics") or {}).get("enabled")
+           and s["diagnostics"].get("verdict") == "不可靠"]
+    if bad:
+        detail = ";".join(
+            f"cam{s['cam']}:红灯 {','.join(d['red_names']) or '未命名'}" for s, d in bad)
+        raise RuntimeError(
+            f"内参模型充分性体检未通过({detail}——畸变模型不充分,内参不可靠;"
+            f"禁止消费该内参进入双目标定。体检明细见 report.md 模型充分性体检节"
+            f"与各路 intrinsics.json 的 diagnostics 键)")

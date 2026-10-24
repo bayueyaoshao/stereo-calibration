@@ -513,7 +513,11 @@ def _stereo_e2e_env(tmp_path: pathlib.Path, n_train: int = 10, n_test: int = 6,
             rms_train_overall=0.33, rms_test_overall=0.24,
             n_views_train=n_train, n_views_test=n_test, dropped_frames=[],
             solver_meta={"status": 0}, board=BoardSpec(),
-            config_snapshot={})
+            config_snapshot={},
+            # 2026-10-24 契约增补 diagnostics(只增字段);Phase 3 装载层
+            # 按名读子集、不消费体检,夹具给一份最小的「可靠」占位即可
+            diagnostics={"enabled": True, "verdict": "可靠", "reliable": True,
+                         "red_count": 0, "red_names": [], "notes": [], "checks": []})
 
     _seed(1, synth_train.params1)
     _seed(2, synth_train.params2)
