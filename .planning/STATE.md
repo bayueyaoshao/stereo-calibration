@@ -41,8 +41,8 @@ Plan: 5 of 5 executed + code review 修复 + verification 完成
 |--------|--------|---------|
 | Requirements shipped | 17 | 0 |
 | Phases complete | 3 | 0 |
-| 内参 test RMS | < 1.0 px | cam1 0.1407 / cam2 0.1361 |
-| 双目距离残差 RMS | < 5 mm | 16.93(FAIL,SC3 生产实测;03-05 联合 BA 裁决全灭未落地)|
+| 内参 test RMS | < 1.0 px | cam1 0.0652 / cam2 0.0760(M8;体检:cam1 可靠 / cam2 不可靠)|
+| 双目距离残差 RMS | < 5 mm | 16.93(M2 时代实测,已失效不可比;M8 下因 cam2 内参不可靠阻塞未测)|
 
 ## Accumulated Context
 
@@ -65,6 +65,7 @@ Plan: 5 of 5 executed + code review 修复 + verification 完成
 - SC3 生产验收 FAIL:test 距离残差 16.93mm ≫ 5mm(03-04-SUMMARY 完整诊断)。根因:两路独立内参在双目精度下互不兼容(相对位姿逐对散布中位 2.5°/max 12.2°)+ 支架跨帧摆动;刚性外参+固定内参模型在本数据不可达
 - 联合 BA 预案已被 03-05 收敛裁决否决:三变体全灭(漂移越界为致命判据,SC3 达标与内参物理可信结构性不可兼得)
 - **内参可辨识性诊断(2026-10-24 晨,/tmp/ident_diag_0326.py)终审:Phase 2 内参被数据强钉死(σ(fx)/fx ≈ 0.3–0.9%,profile likelihood),联合 BA 漂移 12σ–156σ 非物理解**——方向 (a) 协方差先验、(b) 只放主点均被数字否决;结论:问题在采集物理(支架刚性/同步),推荐采集整改后重跑现有链;备选逐对外参管线(放弃公共 R/T)需用户决策(03-HUMAN-UAT HUMAN-4)
+- **cam2 内参 M8 下仍不可靠(2026-10-24,quick 261024-rational8-production honest-stop)**:红 A1=0.0280(阈 0.02)/A3=0.9392%(阈 0.5%)——两轮证据驱动剔除(1.08/0.460/0.447px 三帧)证明非离群帧,M2/M8 双模型下同判证明非单模型失配,A4 同阶独立重标 fx 2037.52 vs 产线 2034.88(0.13%)证明 fx 未漂;中心桶 0.028px 径向结构 + 外圈切片 fx 低压(2020.9 vs 内圈 2038.6)为数据/光学层效应 → fail-closed 禁入双目,Phase 3 重跑阻塞(方向决策见 deferred-items)
 
 ### Quick Tasks Completed
 
@@ -74,12 +75,13 @@ Plan: 5 of 5 executed + code review 修复 + verification 完成
 | 261024-cr02 | 修复 phase 2 code review CR-01/WR-01/WR-02(异常收口三层防线、配置类型守卫、jac_sparsity 死代码),124 测试,生产重跑逐位复现 0.1407/0.1361 | 2026-10-24 | 8cd1231 | [261024-cr02-phase2-review-critical-warning](./quick/261024-cr02-phase2-review-critical-warning/) |
 | 261024-cr03 | 修复 phase 3 code review CR-01/WR-01/WR-02(joint.enabled fail-closed 硬门、train 评估降级收口、pairs CSV 中文收口),214 测试,生产重跑留痕形态不变 | 2026-10-24 | 6910b96 | [261024-cr03-phase3-review-critical-warning](./quick/261024-cr03-phase3-review-critical-warning/) |
 | 261024-intrinsic-adequacy | 内参模型充分性体检(A0/A1/A3/A4)fail-closed 接入内参管线:INTR-05 增补,244 测试,生产双机判不可靠(cam1 红 A1/A3/A4、cam2 红 A1/A3)exit 1,rational8 重标待办已登记 | 2026-10-24 | f2bb429 | [261024-intrinsic-adequacy-battery](./quick/261024-intrinsic-adequacy-battery/) |
+| 261024-rational8 | 产线 M8 rational8 畸变模型全链一等公民 + Phase 2 重标:INTR-06 增补,270 测试,cam1 体检转绿(fx=2042.89 锚点 ±1% 带,test RMS 0.0652)、cam2 两轮证据剔除后仍红 A1/A3(结构性残差)honest-stop,双目重跑阻塞 | 2026-10-24 | 6d570ac/fc2d7f7/63023fc/1d52d86 | [261024-rational8-production](./quick/261024-rational8-production/) |
 
 ## Session Continuity
 
-- **Last action:** quick 261024 内参模型充分性体检落地(2026-10-24):INTR-05 体检闸门 fail-closed 接入内参管线,生产实证双机均判「内参不可靠」(cam1 红 A1/A3/A4:A0=1.4730/A1=0.0220/A2=0.1852/A3=3.6567/A4=11.2404;cam2 红 A1/A3:A0=1.0578/A1=0.0772/A2=0.1835/A3=1.2795/A4=0.7395),exit 1,rational8 产线支持 + Phase 2 重标 + Phase 3 重跑待办已登记 deferred-items(244 测试,提交 0ec36e4/2406c97/f2bb429)
-- **Next action:** 用户晨间读晨报 → 03-HUMAN-UAT 四项(重点 HUMAN-4 方向决策);体检结论为 HUMAN-4 提供新证据:M2 对本相机欠拟合被量化证实(cam1 A4 fx 跳变 11.2%),即便采集整改,内参模型本身也需 rational8 升阶支持(见 deferred-items 待办)
-- **Notes:** data/ 指纹:未排序 find 的 md5 聚合命令顺序不可复现(连续三次三个值),排序版可复现指纹 8a430c9395e91f256923b2a6eabb4354,体检任务前后内容未变(无 jpg 晚于任务 PLAN.md 的 mtime);output/intrinsic/ 已被体检判「不可靠」留痕(report.md 体检节 + intrinsics.json diagnostics 键),禁止消费进双目标定;裁决数值 /tmp/joint_trial_0305_result.md、诊断脚本 /tmp/ident_diag_0326.py(/tmp 重启即失,重算可向助手索取);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2) + 03-HUMAN-UAT(4)
+- **Last action:** quick 261024-rational8-production(2026-10-24):M8 rational8 畸变模型产线一等公民全链落地(6d570ac models 双模型化 / fc2d7f7 solve+config / 63023fc 契约+体检+双目装载,契约只增不改、270 测试、存量 M2 测试零修改);Phase 2 重标:cam1 证据剔除 27 帧后体检 5 项全绿(fx=2042.89 落参考锚点 2037±1% 带,独立重标探针 2037.04,test RMS 0.1407→0.0652px),cam2 两轮剔除 3 帧后仍红 A1=0.0280/A3=0.9392 → 按授权「不许放宽阈值硬凑」honest-stop(1d52d86 剔除配置),双目重跑未执行(fail-closed);INTR-06 增补,deferred-items rational8 待办销账 + 两条新登记,数值全表见 quick/261024-rational8-production/SUMMARY.md
+- **Next action:** 用户决策 cam2 结构性残差方向(deferred-items 新登记:Phase 1 外圈角点质量分层复核 / 采集侧排查光轴-传感器倾斜与 C-mount 机械应力 / 更高阶模型风险自认);cam2 内参 reliable 后重跑 stereo-calib intrinsic → stereo(闸门不动);原晨报四项(03-HUMAN-UAT 重点 HUMAN-4)继续有效
+- **Notes:** data/ 指纹:排序版可复现 8a430c9395e91f256923b2a6eabb4354,本任务提交前后一致;output/intrinsic/ 现为 M8 产物留痕(cam1 可靠 / cam2 不可靠,体检节 + diagnostics 键),cam2 路仍禁止消费进双目;M8 已知限制:自动离群循环评分用 OpenCV 初值(M8 中位 ~1.4–1.8px,阈值膨胀 7–9px,靠手动 exclude_images 兜底,修法已登记);rational D8 逐系数近简并不可单独解读(fx 被强钉死,消费侧用整体映射);.codebuddy/ 为用户自有未跟踪目录(未提交)
 
 ---
 *Initialized 2026-10-23 during roadmap creation*

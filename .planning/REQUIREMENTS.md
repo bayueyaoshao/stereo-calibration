@@ -23,6 +23,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INTR-03**: 用 test 集角点计算每路相机整体重投影 RMS(float64 回代计算,不用 OpenCV 返回值)
 - [x] **INTR-04**: 输出内参标定报告(逐帧误差 + 整体指标)
 - [x] **INTR-05**(quick 261024 增补): 内参模型充分性体检闸门——A0 残差能量比 / A1 残差径向结构 / A2 去畸变直线度(仅报告不判红)/ A3 切片 fx 稳定性 / A4 升阶 rational8 探针;红检数 ≥ min_red_count 判「内参不可靠」,fail-closed 拦截其进入双目标定(产物留痕后中文报错、退出码 1),阈值全部进 config.yaml
+- [x] **INTR-06**(quick 261024-rational8-production 增补): `distortion_model` 可配置 M2/M8——M8 = rational 8(D 长 8,k4/k5/k6 为分母项,12 参):models 单一公式源双模型(den≡1 即 M2)、solve flags/D 解包按模型、intrinsics.json 新增顶层 `distortion_model` 键(只增不改,旧文件缺省 M2 向后兼容)、体检 M8 适配(A4 自动变同阶独立重标一致性探针)、joint 对 M8 fail-closed 拒收;生产实证 cam1 体检转绿(fx=2042.89 落参考锚点 2037±1% 带)、cam2 结构性残差仍不可靠(见 deferred-items,阻塞双目重跑)
 
 ### 模块3 — 双目标定 (STER)
 
@@ -70,6 +71,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INTR-03 | Phase 2 | Complete (02-02 引擎, 02-04 验收) |
 | INTR-04 | Phase 2 | Complete (02-03 报告, 02-04 验收) |
 | INTR-05 | Phase 2 (quick 261024 增补) | Complete (体检闸门 fail-closed 接入, 生产双机判不可靠) |
+| INTR-06 | Phase 2 (quick 261024-rational8-production 增补) | Complete (M8 全链支持, 270 测试; 生产: cam1 reliable / cam2 结构性残差仍不可靠, 双目重跑阻塞) |
 | STER-01 | Phase 3 | Pending |
 | STER-02 | Phase 3 | Pending |
 | STER-03 | Phase 3 | Pending |
@@ -80,10 +82,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 **Coverage:**
 
-- v1 requirements: 18 total
-- Mapped to phases: 18 ✓
+- v1 requirements: 19 total
+- Mapped to phases: 19 ✓
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-24 after quick 261024-intrinsic-adequacy-battery (INTR-05 增补:内参模型充分性体检闸门 fail-closed 接入内参管线,生产重跑双机判「不可靠」退出码 1;前次 2026-10-24 after 02-04:INTR-01/02/03/04 complete,两路 test RMS 0.1407/0.1361px)*
+*Last updated: 2026-10-24 after quick 261024-rational8-production (INTR-06 增补:M8 rational8 全链支持,cam1 体检转绿 fx=2042.89/cam2 结构性残差仍不可靠;前次 2026-10-24 after quick 261024-intrinsic-adequacy-battery:INTR-05 增补,双机判不可靠;前次 02-04:INTR-01..04 complete,两路 test RMS 0.1407/0.1361px)*
