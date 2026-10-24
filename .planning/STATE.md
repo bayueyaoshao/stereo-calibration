@@ -73,11 +73,11 @@ Plan: 5 of 5 executed + code review 修复 + verification 完成
 | 261023-wp3 | 修复 phase 1 code review 三个高价值发现(CR-01 分组键、WR-01 窗口阶梯、WR-02 失败标签) | 2026-10-23 | de3daae | [261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02](./quick/261023-wp3-phase-1-code-review-cr-01-wr-01-wr-02/) |
 | 261024-cr02 | 修复 phase 2 code review CR-01/WR-01/WR-02(异常收口三层防线、配置类型守卫、jac_sparsity 死代码),124 测试,生产重跑逐位复现 0.1407/0.1361 | 2026-10-24 | 8cd1231 | [261024-cr02-phase2-review-critical-warning](./quick/261024-cr02-phase2-review-critical-warning/) |
 | 261024-cr03 | 修复 phase 3 code review CR-01/WR-01/WR-02(joint.enabled fail-closed 硬门、train 评估降级收口、pairs CSV 中文收口),214 测试,生产重跑留痕形态不变 | 2026-10-24 | 6910b96 | [261024-cr03-phase3-review-critical-warning](./quick/261024-cr03-phase3-review-critical-warning/) |
-| 261024-intrinsic-adequacy | 内参模型充分性体检(A0/A1/A3/A4)fail-closed 接入内参管线:INTR-05 增补,260 测试,生产双机判不可靠(cam1 红 A1/A3/A4、cam2 红 A1/A3)exit 1,rational8 重标待办已登记 | 2026-10-24 | f2bb429 | [261024-intrinsic-adequacy-battery](./quick/261024-intrinsic-adequacy-battery/) |
+| 261024-intrinsic-adequacy | 内参模型充分性体检(A0/A1/A3/A4)fail-closed 接入内参管线:INTR-05 增补,244 测试,生产双机判不可靠(cam1 红 A1/A3/A4、cam2 红 A1/A3)exit 1,rational8 重标待办已登记 | 2026-10-24 | f2bb429 | [261024-intrinsic-adequacy-battery](./quick/261024-intrinsic-adequacy-battery/) |
 
 ## Session Continuity
 
-- **Last action:** quick 261024 内参模型充分性体检落地(2026-10-24):INTR-05 体检闸门 fail-closed 接入内参管线,生产实证双机均判「内参不可靠」(cam1 红 A1/A3/A4:A0=1.4730/A1=0.0220/A2=0.1852/A3=3.6567/A4=11.2404;cam2 红 A1/A3:A0=1.0578/A1=0.0772/A2=0.1835/A3=1.2795/A4=0.7395),exit 1,rational8 产线支持 + Phase 2 重标 + Phase 3 重跑待办已登记 deferred-items(260 测试,提交 0ec36e4/2406c97/f2bb429)
+- **Last action:** quick 261024 内参模型充分性体检落地(2026-10-24):INTR-05 体检闸门 fail-closed 接入内参管线,生产实证双机均判「内参不可靠」(cam1 红 A1/A3/A4:A0=1.4730/A1=0.0220/A2=0.1852/A3=3.6567/A4=11.2404;cam2 红 A1/A3:A0=1.0578/A1=0.0772/A2=0.1835/A3=1.2795/A4=0.7395),exit 1,rational8 产线支持 + Phase 2 重标 + Phase 3 重跑待办已登记 deferred-items(244 测试,提交 0ec36e4/2406c97/f2bb429)
 - **Next action:** 用户晨间读晨报 → 03-HUMAN-UAT 四项(重点 HUMAN-4 方向决策);体检结论为 HUMAN-4 提供新证据:M2 对本相机欠拟合被量化证实(cam1 A4 fx 跳变 11.2%),即便采集整改,内参模型本身也需 rational8 升阶支持(见 deferred-items 待办)
 - **Notes:** data/ 指纹:未排序 find 的 md5 聚合命令顺序不可复现(连续三次三个值),排序版可复现指纹 8a430c9395e91f256923b2a6eabb4354,体检任务前后内容未变(无 jpg 晚于任务 PLAN.md 的 mtime);output/intrinsic/ 已被体检判「不可靠」留痕(report.md 体检节 + intrinsics.json diagnostics 键),禁止消费进双目标定;裁决数值 /tmp/joint_trial_0305_result.md、诊断脚本 /tmp/ident_diag_0326.py(/tmp 重启即失,重算可向助手索取);晨间人工项:01-HUMAN-UAT(3) + 02-HUMAN-UAT(2) + 03-HUMAN-UAT(4)
 

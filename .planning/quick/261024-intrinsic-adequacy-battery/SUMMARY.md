@@ -52,7 +52,7 @@ Phase 2 内参标量指标很好看(cam1/cam2 test RMS 0.1407/0.1361px 远小于
 
 ### 3. 质量闸门
 
-- 全量 `uv run pytest -q`:**260 passed, 0 failed**(开工基线 214,零回退)
+- 全量 `uv run pytest -q`:**244 passed, 0 failed**(开工基线 214,零回退)
 - `uv run ruff check .`:本任务全部新建/改动文件干净;仅剩 6 个存量告警(EXE001×1 指向未跟踪目录 .codebuddy、RUF007×1 + C408×4 均为 Phase 1 旧测试文件),已登记 deferred-items,按 Scope Boundary 不修
 
 ## 偏差与决策留痕(最保守选项)
