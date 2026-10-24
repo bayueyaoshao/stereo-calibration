@@ -289,7 +289,7 @@ def test_solve_calibration_m8_recovers_synthetic_truth():
     assert fx_rel_init < 5e-3, f"M8 初值 fx 相对误差 {fx_rel_init:.3e}(须 < 5e-3)"
 
     result = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig(), model="M8")
-    assert result.solver == "scipy"
+    assert result.solver == "opencv+wash", "M8 定稿=精化+洗盆,solver 须如实标注"
     assert result.params.shape == (12,)
     assert result.params[4:].shape == (8,), "M8 布局 D 必须恰 8 长"
     fx_rel = abs(result.params[0] - _PARAMS_M8_TRUE[0]) / _PARAMS_M8_TRUE[0]
@@ -297,44 +297,50 @@ def test_solve_calibration_m8_recovers_synthetic_truth():
 
     m = compute_metrics(objp, uvs, result.params, result.rvecs, result.tvecs)
     assert m.rms_overall < 0.2, f"M8 精化后回代 RMS {m.rms_overall:.4f}px(须 < 0.2)"
-    assert result.solver_meta["converged"] is True, (
-        f"实用收敛判定须为 True(meta={result.solver_meta})")
+    assert result.solver_meta["pre_wash_meta"]["converged"] is True, (
+        f"精化链实用收敛判定须为 True(meta={result.solver_meta})")
 
 
-def test_m8_two_pass_meta_records_both_pass_rms():
-    """M8 两遍拟合的 meta 契约(追加轮):两遍各自 cv RMS 不静默,对账键取定稿。
-
-    M2 路径零改动:meta 里绝不出现 pass1/pass2 键(单遍拟合的原状锁定)。
+def test_m8_wash_meta_chain_and_single_pass_revert():
+    """M8 洗盆 meta 契约(追加轮):solve_calibration 定稿解 solver 标
+    "opencv+wash",洗盆 provenance 与精化链对账全留痕(不静默);
+    solve_opencv 恒单遍(无 pass/wash 键);M2 路径零改动(无洗盆)。
     """
     objp = _object_points(square_mm=40.0)
     uvs = _synthetic_views_m8(n_views=6)
-    m8 = solve_opencv(uvs, objp, _IMAGE_SIZE, model="M8")
-    for key in ("opencv_rms_pass1", "opencv_rms_pass2"):
-        assert key in m8.solver_meta and m8.solver_meta[key] > 0.0, (
-            f"M8 solver_meta 缺 {key}:两遍各自 cv RMS 必须如实留痕(不静默)")
-    assert m8.solver_meta["opencv_rms"] == pytest.approx(m8.solver_meta["opencv_rms_pass2"]), (
-        "对账键 opencv_rms 须取第二遍(定稿解)口径,精化链留痕不断")
-    assert m8.solver_meta["pass2_flags_used"] == (
-        int(cv2.CALIB_RATIONAL_MODEL) | int(cv2.CALIB_USE_INTRINSIC_GUESS)), (
-        "第二遍 flags 必须 RATIONAL|USE_INTRINSIC_GUESS(guess 自再拟合)")
 
-    m2 = solve_opencv(_synthetic_views(n_views=6), _object_points(), _IMAGE_SIZE)
-    assert "opencv_rms_pass1" not in m2.solver_meta, "M2 单遍:不许出现两遍拟合键"
-    assert "opencv_rms_pass2" not in m2.solver_meta, "M2 单遍:不许出现两遍拟合键"
-    assert m2.solver_meta["flags_used"] == 0, "M2 flags=0 原状"
+    fresh = solve_opencv(uvs, objp, _IMAGE_SIZE, model="M8")
+    assert fresh.solver == "opencv"
+    assert "wash_pass" not in fresh.solver_meta, "初值路径不许出现洗盆键(单遍)"
+    assert "opencv_rms_pass1" not in fresh.solver_meta
+
+    final = solve_calibration(uvs, objp, _IMAGE_SIZE, RefineConfig(), model="M8")
+    assert final.solver == "opencv+wash", "M8 定稿解须如实标注洗盆来源"
+    assert final.solver_meta["wash_pass"].startswith("M8 洗盆"), "洗盆 provenance 不静默"
+    assert final.solver_meta["pre_wash_solver"] == "scipy", "洗盆输入必须来自精化解"
+    assert final.solver_meta["pre_wash_fx"] > 0.0
+    assert final.solver_meta["pre_wash_meta"]["converged"] is True, "精化链对账须随行"
+    assert final.solver_meta["flags_used"] == (
+        int(cv2.CALIB_RATIONAL_MODEL) | int(cv2.CALIB_USE_INTRINSIC_GUESS)), (
+        "洗盆 flags 必须 RATIONAL|USE_INTRINSIC_GUESS")
+
+    m2 = solve_calibration(_synthetic_views(n_views=6), _object_points(),
+                           _IMAGE_SIZE, RefineConfig())
+    assert m2.solver == "scipy", "M2 定稿路径零改动(solver=scipy)"
+    assert "wash_pass" not in m2.solver_meta, "M2 无洗盆"
 
 
 def test_m8_pass2_washes_degenerate_valley_guess_into_good_basin():
-    """退化谷单测(追加轮核心):爆炸系数的 M8 解作 guess → 生产 pass2 拟合后
-    体检 A1/A3 口径转绿。
+    """退化谷单测(追加轮核心):爆炸系数的 M8 解作 guess → 生产洗盆机器
+    (_solve_opencv_m8_pass2)拟合后体检 A1/A3 口径转绿。
 
-    产线 cam2 实证病灶:fresh rational 初值落入 fx-D 简并谷(D 系数爆炸互相
-    抵消 [k2≈75,k5≈77,k6≈71]、fx 2034.88 偏离锚点 2037、残差带 A1=0.028px
-    ——局部极小,RMS 与好盆地相当,标量指标看不出)。修法 = 第二遍
-    RATIONAL|USE_INTRINSIC_GUESS 自再拟合(真实数据实测:cam2 从谷 guess 洗
-    回好盆地 fx 2037.53/A1 0.0011)。合成等价构造:直接以 cam2 谷形态的爆炸
-    系数解作 guess 驱动生产 pass2 助手,断言①fx 恢复 <0.5%、②D 大系数退场
-    (好盆地,不是谷)、③体检 verdict 可靠且 A1/A3 不红。
+    产线 cam2 实证病灶:精化解落入 fx-D 简并谷(D 系数爆炸互相抵消
+    [k2≈75,k5≈77,k6≈71]、fx 2034.88 偏离锚点 2037、残差带 A1=0.028px
+    ——局部极小,RMS 与好盆地相当,标量指标看不出)。修法 = 精化后的
+    第二遍 cv2 拟合 RATIONAL|USE_INTRINSIC_GUESS(真实数据实测:cam2 从谷
+    guess 洗回好盆地 fx 2037.53/A1 0.0011)。合成等价构造:直接以 cam2 谷
+    形态的爆炸系数解作 guess 驱动生产洗盆助手,断言①fx 恢复 <0.5%、
+    ②D 大系数退场(好盆地,不是谷)、③体检 verdict 可靠且 A1/A3 不红。
     """
     from stereo_calib.intrinsic.diagnostics import run_battery
     from stereo_calib.io.config import IntrinsicDiagnosticsConfig

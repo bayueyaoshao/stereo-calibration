@@ -8,21 +8,29 @@ config 传入(2026-10-24 增补);算法与调用形态照搬参考工程已验�
 
 结构(单一数学源纪律,RESEARCH Pattern 1/3):
 - OpenCV 路径 solve_opencv:标定只当黑盒初始化器,float32 装包规则隔离
-  在本文件调用处(绑定层只收 32 位,进 64 位会当场拒收);M8 路径做
-  两遍拟合(见下,2026-10-24 追加轮,真实数据实证),M2 单遍不变;
+  在本文件调用处(绑定层只收 32 位,进 64 位会当场拒收);单遍拟合
+  (fresh,M2/M8 同构,flags 按模型分派);
 - scipy 路径 refine_scipy:theta 联合装箱 + 解析稀疏雅可比 + trf/lsmr;
   残差与雅可比只准 import intrinsic.models 的投影/变换函数,本文件不
   出现第二份投影或畸变公式(源码防线测试锁定);
-- 编排入口 solve_calibration:初值 →(配置开关)精化,02-03 唯一消费它。
+- 编排入口 solve_calibration:初值 →(配置开关)精化 →(仅 M8)洗盆,
+  02-03 唯一消费它。
 
-M8 两遍拟合(2026-10-24 追加轮):fresh rational 初值会偶发落入 fx-D 简并
-谷(产线 cam2 实证:D 系数爆炸互相抵消 [k2≈75,k5≈77,k6≈71],fx 2034.88
-偏离锚点 2037,残差带结构 A1=0.028px——局部极小、RMS 相当,标量指标看不
-出)。修法:第一遍现状拟合后,第二遍以 flags=RATIONAL|USE_INTRINSIC_GUESS、
-guess=第一遍 K/D 自再拟合——从退化谷 guess 出发确定性洗回好盆地(实测
-cam2 fx 2034.88→2037.53、体检 A1 0.028→0.0011;好盆地再拟合不变坏)。
-两遍各自的 cv RMS 进 solver_meta(opencv_rms_pass1/opencv_rms_pass2,
-不静默);对账键 opencv_rms 取第二遍(定稿解)口径,精化链留痕不断。
+M8 洗盆(2026-10-24 追加轮,真实数据逐级探针实证):fresh rational 初值
+在本数据上常落垃圾盆地(cam1 114 帧 fx≈5892 / cam2 152 帧 fx≈8908,D 爆
+炸~500),scipy 精化把它拉回 ~2040 邻域,但 cam2 恒落 fx-D 简并谷(D 系数
+爆炸互相抵消 [k2≈75,k5≈77,k6≈71],fx 2034.88 偏离锚点 2037,残差带结构
+A1=0.028px——局部极小、RMS 与好盆地相当,标量指标看不出)。修法:精化
+之后再做一遍 cv2 拟合(flags=RATIONAL|USE_INTRINSIC_GUESS,guess=精化解)
+——从谷解 guess 确定性洗回好盆地(实测 cam2 fx 2034.88→2037.53、体检
+A1 0.028→0.0011;好盆地再拟合不变坏)。
+
+为什么洗盆在精化之后而非 fresh 之后(与追加任务书字面「solve_opencv 做
+两遍拟合」的位置偏差,生产实测归因):fresh 解是远离真解的垃圾(fx 5892/
+8908),以它作 guess 的第二遍 cv2 拟合洗不动(cam2 实测仍 fx 8256 垃圾,
+逐帧中位 4.24px);已验证可洗的输入「2034.88+爆炸系数」恰是精化后的谷解。
+故洗盆消费精化解,放在 solve_calibration 编排位;solve_opencv 保持单遍
+(剔除循环评分口径随之与第一轮完全一致)。
 
 指标口径(Pitfall 12):OpenCV 返回的整体 RMS 基于 float32 装包角点,
 与 float64 回代差约 1e-4 像素——只进 solver_meta["opencv_rms"] 留对账
@@ -57,7 +65,8 @@ class SolveResult:
 
     params (9,)/(12,) 布局见 models.intrinsic_names(M2/M8);rvecs/tvecs
     (V,3) 与输入视图逐行对齐(行序契约,装载层定死,下游绝不重排);
-    solver 如实标注解的来源("opencv" 初值 | "scipy" 精化);solver_meta
+    solver 如实标注解的来源("opencv" 初值 | "scipy" 精化 |
+    "opencv+wash" 精化后洗盆,M8 专属);solver_meta
     留对账与收敛判定依据(status/nfev/final_cost/tail_improvement/
     opencv_rms/distortion_model),不静默(T-02-05)。
     """
@@ -139,13 +148,14 @@ def _unpack_opencv_solution(model: str, names, K, D, rvecs, tvecs,
 
 def _solve_opencv_m8_pass2(objs32, imgs32, size, K1: np.ndarray, D1: np.ndarray,
                            rational_flags: int) -> tuple:
-    """M8 第二遍拟合:从第一遍解出发的 guess 自再拟合(退化谷确定性洗出)。
+    """M8 第二遍拟合:从既有解出发的 guess 再拟合(退化谷洗盆的机器)。
 
-    flags = 第一遍 rational flags | CALIB_USE_INTRINSIC_GUESS,guess =
-    第一遍 K/D(产线 D 本就 8 长;OpenCV 返回多于 8 位时余位恒零,截前 8
-    传入)。独立成函数:退化谷单测直接驱动它(构造爆炸系数 guess → 洗回
-    好盆地),不必让 solve_opencv 暴露 guess 注入口。失败契约与第一遍同:
-    cv2.error 收口为中文 ValueError(附视图上下文)。
+    flags = rational flags | CALIB_USE_INTRINSIC_GUESS,guess = 输入 K/D
+    (产线 D 本就 8 长;OpenCV 返回多于 8 位时余位恒零,截前 8 传入)。
+    独立成函数:退化谷单测直接驱动它(构造爆炸系数 guess → 洗回好盆地),
+    不必让编排层暴露 guess 注入口。失败契约与第一遍同:cv2.error 收口为
+    中文 ValueError。注意:洗盆输入须是近真解(精化后)的解——从远离真解
+    的垃圾 guess 出发洗不动(真实数据探针实证,见模块 docstring)。
     """
     flags2 = int(rational_flags) | int(cv2.CALIB_USE_INTRINSIC_GUESS)
     try:
@@ -159,22 +169,20 @@ def _solve_opencv_m8_pass2(objs32, imgs32, size, K1: np.ndarray, D1: np.ndarray,
     except cv2.error as e:
         raise ValueError(
             f"OpenCV 标定第二遍拟合失败:{e}。"
-            f"第二遍吃第一遍解作初值,理论上不因初值炸——出现此错说明第一遍解"
+            f"第二遍吃既有解作初值,理论上不因初值炸——出现此错说明该解"
             f"病态或数据退化,请检查该批视图的分布。") from e
     return rms2, K2, D2, rvecs2, tvecs2, flags2
 
 
 def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
-    """OpenCV 初值路径:按配置的畸变模型估全畸变,返回"初值版"标定结果。
+    """OpenCV 初值路径:按配置的畸变模型一次估全畸变,返回"初值版"标定结果。
 
     白话:把角点观测交标定黑盒拿一份能用的起点(内参 + 每视图位姿),
     精度到初值口径为止——后续要么直接消费(精化开关关),要么交给
-    refine_scipy 精化。flags 按模型分派:M2 全 5 畸变 flags=0,单遍拟合;
-    M8 加 CALIB_RATIONAL_MODEL(不给该 flag 时 OpenCV 对 8 长布局会静默
-    截断)并做两遍拟合(第一遍 fresh → 第二遍 USE_INTRINSIC_GUESS 自再
-    拟合,防 fresh 初值偶发落入 fx-D 简并谷,模块 docstring 有完整实证
-    记录),两遍 cv RMS 都进 solver_meta(opencv_rms_pass1/pass2,不静默;
-    对账键 opencv_rms 取第二遍定稿口径)。M2 路径零改动(已验证契约)。
+    refine_scipy 精化。flags 按模型分派:M2 全 5 畸变 flags=0;M8 加
+    CALIB_RATIONAL_MODEL(不给该 flag 时 OpenCV 对 8 长布局会静默截断)。
+    本函数恒单遍拟合(M8 的洗盆第二遍在精化之后,见 solve_calibration;
+    剔除循环的评分口径因此与初值解严格一致)。
 
     参数:
         uvs:        (V,P,2) 或逐视图 (P,2) 列表,角点像素坐标(行序契约);
@@ -204,7 +212,7 @@ def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
     try:
         # 第 8 个返回值 per_view 是 float32 口径的逐帧表,剔除判据与报告
         # 一律不用它(Pitfall 12),下划线接收不读。
-        rms1, K1, D1, rvecs1, tvecs1, _std_int, _std_ext, _per_view = cv2.calibrateCameraExtended(
+        rms, K, D, rvecs, tvecs, _std_int, _std_ext, _per_view = cv2.calibrateCameraExtended(
             objs32, imgs32, size, None, None, flags=flags)
     except cv2.error as e:
         raise ValueError(
@@ -213,28 +221,12 @@ def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
             f"请检查该批视图的分布。"
         ) from e
 
-    params1, rvecs_arr, tvecs_arr = _unpack_opencv_solution(
-        model, names, K1, D1, rvecs1, tvecs1, n_views)
-    meta = {"path": "calibrateCameraExtended", "flags_used": int(flags),
-            "distortion_model": model, "opencv_rms": float(rms1)}
-    if model != "M8":
-        return SolveResult(params=params1, rvecs=rvecs_arr, tvecs=tvecs_arr,
-                           solver="opencv", solver_meta=meta)
-
-    # ---- M8 第二遍:guess 自再拟合(退化谷确定性洗出;M2 无此路径)----
-    rms2, K2, D2, rvecs2, tvecs2, flags2 = _solve_opencv_m8_pass2(
-        objs32, imgs32, size, K1, params1[4:], int(flags))
-    params2, rvecs2_arr, tvecs2_arr = _unpack_opencv_solution(
-        model, names, K2, D2, rvecs2, tvecs2, n_views)
-    meta.update({
-        "opencv_rms": float(rms2),           # 对账口径 = 定稿解(第二遍)
-        "opencv_rms_pass1": float(rms1),     # 两遍各自 cv RMS,不静默
-        "opencv_rms_pass2": float(rms2),
-        "pass2_flags_used": int(flags2),
-        "pass2": "fresh rational 后以第一遍解作 guess 自再拟合(防 fx-D 简并谷)",
-    })
-    return SolveResult(params=params2, rvecs=rvecs2_arr, tvecs=tvecs2_arr,
-                       solver="opencv", solver_meta=meta)
+    params, rvecs_arr, tvecs_arr = _unpack_opencv_solution(
+        model, names, K, D, rvecs, tvecs, n_views)
+    return SolveResult(
+        params=params, rvecs=rvecs_arr, tvecs=tvecs_arr, solver="opencv",
+        solver_meta={"path": "calibrateCameraExtended", "flags_used": int(flags),
+                     "distortion_model": model, "opencv_rms": float(rms)})
 
 
 # ---------------------------------------------------------------------------
@@ -518,15 +510,59 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
                        solver="scipy", solver_meta=meta)
 
 
+def _wash_m8_valley(uvs, objp, image_size, refined: SolveResult,
+                    model: str) -> SolveResult:
+    """M8 洗盆:精化解作 guess 的第二遍 cv2 拟合(退化谷确定性洗出)。
+
+    为什么(真实数据逐级探针实证,模块 docstring 有全记录):cam2 的 scipy
+    精化恒落 fx-D 简并谷(fx 2034.88、D 爆炸 [k2≈75,k5≈77,k6≈71]、A1 残差
+    带 0.028px)——谷是 RMS 相当的局部极小,精化洗不动自己;而以「精化后的
+    谷解」作 guess 的 cv2 GUESS 再拟合确定性洗回好盆地(实测 cam2 fx
+    2037.53、体检 A1 0.0011,好盆地再拟合不变坏)。fresh 初值是远离真解的
+    垃圾(fx 5892/8908),以它作 guess 洗不动——故本遍只吃精化解。
+
+    solver 如实标 "opencv+wash"(最终参数出自 cv2 优化器,非精化器本身);
+    精化链对账不静默:精化前 fx、solver 标签与完整精化 solver_meta 都随行。
+    """
+    uvs_arr, objp_arr, size = _check_common_inputs(uvs, objp, image_size)
+    n_views, n_points = uvs_arr.shape[0], uvs_arr.shape[1]
+    names = models.intrinsic_names(model)
+    objs32 = [objp_arr.astype(np.float32).reshape(n_points, 1, 3) for _ in range(n_views)]
+    imgs32 = [uv.astype(np.float32).reshape(n_points, 1, 2) for uv in uvs_arr]
+    rms_w, K_w, D_w, rvecs_w, tvecs_w, flags_w = _solve_opencv_m8_pass2(
+        objs32, imgs32, size, models.intrinsics_matrix(refined.params),
+        refined.params[4:], int(cv2.CALIB_RATIONAL_MODEL))
+    params_w, rvecs_arr, tvecs_arr = _unpack_opencv_solution(
+        model, names, K_w, D_w, rvecs_w, tvecs_w, n_views)
+    meta = {
+        "path": "calibrateCameraExtended",
+        "flags_used": int(flags_w),
+        "distortion_model": model,
+        "opencv_rms": float(rms_w),
+        "wash_pass": ("M8 洗盆:scipy 精化解作 guess 的第二遍 cv2 拟合"
+                      "(RATIONAL|USE_INTRINSIC_GUESS,防 fx-D 简并谷)"),
+        "pre_wash_solver": refined.solver,
+        "pre_wash_fx": float(refined.params[0]),
+        "pre_wash_meta": refined.solver_meta,
+    }
+    return SolveResult(params=params_w, rvecs=rvecs_arr, tvecs=tvecs_arr,
+                       solver="opencv+wash", solver_meta=meta)
+
+
 def solve_calibration(uvs, objp, image_size, refine_cfg: RefineConfig,
                       model: str = "M2") -> SolveResult:
-    """编排入口(02-03 唯一消费它):OpenCV 初值 →(配置开关)scipy 精化。
+    """编排入口(02-03 唯一消费它):OpenCV 初值 →(配置开关)scipy 精化
+    →(仅 M8)洗盆。
 
     refine_cfg.enabled=False 时原样返回初值解,solver 如实标 "opencv";
-    True 时精化,solver 标 "scipy" 且 solver_meta 保留 opencv_rms 对账。
-    model("M2"|"M8")透传给初值与精化两条路径。
+    True 时精化,solver 标 "scipy" 且 solver_meta 保留 opencv_rms 对账;
+    M8 再加洗盆第二遍(solver 标 "opencv+wash",meta 带精化链对账)——
+    M2 路径零改动(无洗盆,已验证契约)。model("M2"|"M8")透传各路径。
     """
     init = solve_opencv(uvs, objp, image_size, model)
-    if refine_cfg.enabled:
-        return refine_scipy(uvs, objp, image_size, init, refine_cfg, model)
-    return init
+    if not refine_cfg.enabled:
+        return init
+    refined = refine_scipy(uvs, objp, image_size, init, refine_cfg, model)
+    if model != "M8":
+        return refined
+    return _wash_m8_valley(uvs, objp, image_size, refined, model)
