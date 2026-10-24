@@ -32,7 +32,6 @@ from stereo_calib.stereo.solve import (
     make_residual_fn,
     pack_theta,
     pnp_median,
-    refine_stereo,
     relative_pose,
     row_index,
     solve_stereo,
@@ -395,31 +394,22 @@ _REAL_ARTIFACTS = (
 
 
 def test_real_data_stereo_engine_acceptance():
-    """真实 112 对 train 引擎验收:防线哨兵 + 诊断链数值留档(STER-01/02)。
+    """真实 112 对 train 引擎验收:全链过防线 + plan 原门限 pooled RMS(STER-01/02)。
 
     生产门禁,绝不 skip:产物缺失(没跑 Phase 1/2)按门禁失败处理并中文
     指路。
 
-    【2026-10-24 实测数据缺陷留档 —— 本用例为何是"哨兵 + 诊断"双段式】
-    plan 门限 rms_reproj < 1.0px 在当前真实产物上不可达,且已系统性排除
-    引擎侧原因(诊断记录见 03-02-SUMMARY):
-    - 逐对独立位姿拟合两路都亚像素(cam1 中位 0.12px / cam2 0.09px),
-      unproject 路线与带畸变路线逐位一致(排除错误盆地/孪生解);
-    - 但逐对相对位姿相对中位散开中位 2.5°、最大 12.2°(合成噪声地板
-      ~0.05°),且与采集速度/离轴角/深度/时间均不相关;
-    - 三个独立优化器(中位起点/旋转平均起点/交替优化)收敛到同一联合
-      最优 pooled RMS ≈ 6.64px(刚性外参 + 固定内参的可达地板);
-    - 焦距 ±2% 扫描(单路/双路)不塌缩散布(排除 Phase 2 焦距失准);
-    - 全内参放开(±3% 界)联合优化 120 轮仍在缓慢下降(34.9→1.64px,
-      内参持续漂移)——Phase 2 独立标定的两路内参在双目精度下互不兼容
-      (参考工程 multibundle.py 文档串原话记录过同类症状),叠加支架
-      刚性/同步存疑的采集数据。
-    结论:数据/上游缺陷,不是引擎缺陷。因此本用例两段:
-    1) 哨兵段:solve_stereo 必须被离散度防线拦下(fail-closed 是生产
-       正确行为,T-03-08 防线在真实缺陷数据上工作 = 断言它触发);
-    2) 诊断段:防线关闭的诊断链给出量级出口与留档数值,并断言
-       spread 仍超阈值——一旦上游修复(重标内参/重采数据),本断言
-       翻红,强迫有人回来把本用例恢复成 plan 原门限的验收。
+    【历史沿革——本用例曾为「哨兵 + 诊断」双段式,2026-10-24 按预埋协议恢复】
+    M2 内参时代(2026-10-24 晨)两路独立内参在双目精度下互不兼容:pass2
+    离散度中位 2.5°/max 12.2° 超阈,离散度防线 fail-closed 拦下 solve_stereo
+    (诊断留档见 03-02-SUMMARY 与 9088abb 提交信息),当时本用例改为:
+    哨兵段(防线必须触发)+ 诊断段(防线关闭走诊断链),并预埋恢复协议
+    ——「一旦上游修复(重标内参/重采数据),本断言翻红,强迫把本用例恢复
+    成 plan 原门限验收」。同日 quick 261024-rational8-production 追加轮以
+    M8 rational8 内参 + 洗盆修复上游(两机体检 reliable 全绿,cam1
+    fx=2037.04 / cam2 fx=2037.52 落参考锚点 2037±1% 带),防线不再触发、
+    哨兵翻红——按预埋协议恢复为 plan 原门限(pooled rms_reproj < 1.0px)
+    验收,阈值/闸门零改动。
     """
     missing = [str(p) for p in _REAL_ARTIFACTS if not p.is_file()]
     if missing:
@@ -436,23 +426,16 @@ def test_real_data_stereo_engine_acceptance():
     intr1 = load_intrinsics(_REAL_ARTIFACTS[3])
     intr2 = load_intrinsics(_REAL_ARTIFACTS[4])
 
-    # ---- 哨兵段:离散度防线必须在当前真实数据上 fail-closed(T-03-08) ----
-    with pytest.raises(ValueError, match="离散度防线"):
-        solve_stereo(pairs, intr1, intr2, cfg)
-
-    # ---- 诊断段:防线关闭的诊断链(与引擎同一套组件,仅绕开守门) ----
+    # ---- 全链验收:solve_stereo 经真实守门(离散度防线按配置开启)必须通过 ----
     t0 = time.perf_counter()
-    pass1 = pnp_median(pairs, intr1, intr2, median_spread_max_deg=None)
-    pairs2, flip = disambiguate_pairs(pairs, intr1, intr2, pass1,
-                                      cfg.stereo.flip_ratio)
-    pass2 = pnp_median(pairs2, intr1, intr2, median_spread_max_deg=None)
-    from dataclasses import replace as _dc_replace
-    refine_cfg = _dc_replace(cfg.stereo.refine)
-    init = _dc_replace(pass2, spread_deg=float("inf"))
-    result = refine_stereo(pairs2, intr1, intr2, init, refine_cfg)
+    result = solve_stereo(pairs, intr1, intr2, cfg)
     elapsed = time.perf_counter() - t0
 
-    # STER-02 量级出口在诊断链上依然必须成立(baseline 落带 + 近同向)
+    # plan 原门限(预埋协议恢复):pooled 重投影 RMS < 1.0px
+    assert result.rms_reproj < 1.0, (
+        f"pooled RMS {result.rms_reproj:.4f}px 应 < 1.0px(plan 原门限)——"
+        f"上游内参质量或引擎回归,先跑内参体检定位")
+    # STER-02 量级出口(baseline 落带 + 近同向)
     lo, hi = cfg.stereo.baseline_band_mm
     assert lo <= result.baseline_mm <= hi, (
         f"baseline {result.baseline_mm:.2f}mm 落在带 [{lo}, {hi}] 之外——"
@@ -461,26 +444,16 @@ def test_real_data_stereo_engine_acceptance():
         f"转角 {result.rotation_angle_deg:.3f}° 应 < 90°(刚架两相机近同向)")
     assert result.per_pair_rms.shape == (len(pairs.image_ids),)
     assert np.isfinite(result.per_pair_rms).all(), "全部对必须幸存(逐对 RMS 有限)"
-    # 逐对独立拟合亚像素:引擎的逐视图求解机械在真实数据上达标
-    assert float(np.median(pass1.per_pair_rms)) < 0.5, (
-        f"逐对独立 RMS 中位 {np.median(pass1.per_pair_rms):.4f}px 应 < 0.5px"
-        f"(两路独立位姿拟合必须亚像素,否则引擎本身有问题)")
+    assert result.solver_meta["converged"] is True, (
+        "外参精化必须收敛(生产配置 refine 开,T-03-06 收敛判定不静默)")
 
-    # 数据缺陷哨兵:当前真实产物的相对位姿散布必须仍然超阈——上游修复后
-    # 此断言翻红,强迫把本用例恢复成 plan 原门限(rms_reproj < 1.0px)验收。
-    assert pass2.spread_deg > cfg.stereo.median_spread_max_deg, (
-        f"pass2 离散度 {pass2.spread_deg:.3f}° 已不超阈值 "
-        f"{cfg.stereo.median_spread_max_deg}°——真实数据已可过防线!"
-        f"请把本用例恢复成 plan 原门限验收(pooled RMS < 1.0px)并重新记录数值")
-
-    print(f"\n[真实数据引擎诊断留档] pairs={len(pairs.image_ids)} "
+    # 留档数值(预埋协议要求「重新记录数值」)
+    print(f"\n[真实数据引擎验收留档] pairs={len(pairs.image_ids)} "
           f"baseline={result.baseline_mm:.2f}mm "
           f"angle={result.rotation_angle_deg:.3f}deg "
-          f"rms_reproj={result.rms_reproj:.4f}px(未达 plan 门限 1.0px,"
-          f"数据缺陷证据,详见 SUMMARY) "
+          f"rms_reproj={result.rms_reproj:.4f}px(plan 门限 1.0px) "
           f"per_pair_rms_median={float(np.median(result.per_pair_rms)):.4f}px "
-          f"pass2_spread={pass2.spread_deg:.3f}deg "
-          f"pass2_flipped={flip['pass2_flipped']} "
+          f"pass2_flipped={result.flip_log['train']['pass2_flipped']} "
           f"elapsed={elapsed:.1f}s "
           f"status={result.solver_meta['status']} nfev={result.solver_meta['nfev']} "
           f"converged={result.solver_meta['converged']}")
