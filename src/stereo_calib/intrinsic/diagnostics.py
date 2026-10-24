@@ -16,7 +16,10 @@ RMS 依旧 0.14px,直到双目阶段才以相对位姿假散布暴露)。本模�
               仅作信息项报告,不判红。
   A3 切片 fx 稳定性:fx 若在吸收畸变,会随板位漂移——按每帧板中心切 6
               子集(左/右/上/下/内圈/外圈)各自重标 fx,极差 % 超限判红
-              (M8 产线解下切片重标自动带 rational flag,与产线同阶)。
+              (M8 产线解下切片重标自动带 rational flag,与产线同阶;且
+              冻结全部畸变系数只放 fx,fy+位姿——切片全自由重拟合在
+              rational 近简并谷下 fx 弱可辨识、会沿谷漂移放大极差,
+              2026-10-24 追加轮实证与冻结协议见 _refit_fx)。
   A4 模型阶次探针:全量数据同协议升阶 rational8 重标,fx 跳变 % 超限判红
               (跳变远超模型内 σ = 低阶模型欠拟合实锤);产线解已是 M8 时,
               探针语义为「cv2 独立重标一致性」——fx 跳变仍检验 fx 吸收
@@ -154,19 +157,34 @@ def _per_point_residuals(uv: np.ndarray, objp: np.ndarray, K: np.ndarray,
 
 
 def _refit_fx(uv_sub: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
-              image_size: tuple[int, int], rational: bool) -> tuple[float, float]:
+              image_size: tuple[int, int], rational: bool,
+              freeze_distortion: bool = False) -> tuple[float, float]:
     """同协议重标一份子集/全量数据,返回 (fx, cv2 整体 RMS)。
 
     flags=CALIB_USE_INTRINSIC_GUESS(初值吃产线 K/D);rational=True 或
     产线 D 为 8 长(M8)时加 CALIB_RATIONAL_MODEL——不给该 flag 时 OpenCV
     对 8 长布局会静默截断,故 M8 产线解下探针恒为同阶 rational8;M2 五长
     产线值按 rational 开关决定升阶与否(A4 探针,D0 仍传 5 长产线值,
-    OpenCV 内部扩到 8 系)。拟合失败以 cv2.error 上抛,由调用方决定记
-    note 或计数。
+    OpenCV 内部扩到 8 系)。
+
+    freeze_distortion=True(A3 切片在 M8 产线解下的冻结协议,2026-10-24
+    追加轮):加 FIX_K1..K6 | FIX_TANGENT_DIST——8 个畸变系数全部冻结,
+    只放 fx,fy + 每帧位姿。为什么:M8 下切片「全自由」重拟合的 fx 弱可
+    辨识——num/den 近简并谷里 fx 可被畸变系数的谷内漂移抵偿,切片间 fx
+    极差被简并放大(cam2 外圈切片曾读出 fx 2021 的假信号);冻结后 fx 是
+    唯一自由的场依赖信号,极差回归「fx 吸收畸变」的本义(真实数据实测:
+    全自由 cam2 0.94% → 冻结 0.199%,cam1 0.157%,锚点 fx≈2037 附近全绿;
+    M2 协议零改动)。拟合失败以 cv2.error 上抛,由调用方决定记 note 或计数。
     """
     n = uv_sub.shape[0]
     use_rational = bool(rational) or np.asarray(D).size == 8
     flags = cv2.CALIB_USE_INTRINSIC_GUESS | (cv2.CALIB_RATIONAL_MODEL if use_rational else 0)
+    if freeze_distortion:
+        # 只收产线 D 为 8 长(M8)的冻结:5 长 M2 的冻结语义走「A3 全自由
+        # 不变」契约(调用方保证),这里不按长度分派、由调用方显式传入。
+        flags |= (cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
+                  | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5 | cv2.CALIB_FIX_K6
+                  | cv2.CALIB_FIX_TANGENT_DIST)
     objs32 = [np.ascontiguousarray(objp, dtype=np.float32).reshape(-1, 1, 3)
               for _ in range(n)]
     imgs32 = [np.ascontiguousarray(p, dtype=np.float32).reshape(-1, 1, 2)
@@ -251,9 +269,11 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
 
     单切片帧数 < a3_min_frames 跳过;有效切片 < 4 → 「数据不足」不计红
     (红灯必须来自真实判定量)。单切片拟合失败(cv2.error)记 note 跳过。
-    产线 D 为 8 长(M8)时切片重标自动带 rational flag(与产线同阶,
-    见 _refit_fx)——切片间 fx 极差度量的是「fx 吸收畸变随板位漂移」,
-    与模型阶次无关。
+    产线 D 为 8 长(M8)时切片重标自动带 rational flag(与产线同阶)并
+    冻结全部畸变系数(只放 fx,fy+位姿,见 _refit_fx:全自由重拟合在
+    rational 近简并谷下 fx 沿谷漂移,极差被简并放大)——切片间 fx 极差
+    度量的是「fx 吸收畸变随板位漂移」,与模型阶次无关。M2(5 长)协议
+    零改动。
     """
     u_c = uv.mean(axis=1)[:, 0]
     v_c = uv.mean(axis=1)[:, 1]
@@ -267,6 +287,7 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
     notes: list[str] = []
     detail: dict = {}
     fxs: list[float] = []
+    freeze_d = np.asarray(D).size == 8  # 冻结协议按产线 D 长度分派一次:8 长 = M8 冻结 D;5 长 = M2 全自由(零改动)
     for name in _A3_SPLIT_NAMES:
         m = masks[name]
         n = int(m.sum())
@@ -274,7 +295,8 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
             notes.append(f"{name}切片仅 {n} 帧(< a3_min_frames={cfg.a3_min_frames}),跳过")
             continue
         try:
-            fx, _rms = _refit_fx(uv[m], objp, K, D, image_size, rational=False)
+            fx, _rms = _refit_fx(uv[m], objp, K, D, image_size, rational=False,
+                                 freeze_distortion=freeze_d)
         except cv2.error as e:
             notes.append(f"{name}切片重标失败(OpenCV 报错),跳过:{e}")
             continue

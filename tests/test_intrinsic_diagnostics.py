@@ -275,6 +275,66 @@ def test_battery_a3_numeric_path_counts_subsets():
     assert all(v["n_frames"] >= 5 for v in a3.detail.values())
 
 
+# A3 冻结协议的 flag 位集合(M8:D 8 长 → 冻结全部 8 个畸变系数只放 fx,fy+位姿)
+_FREEZE_BITS = (cv2.CALIB_FIX_K1 | cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
+                | cv2.CALIB_FIX_K4 | cv2.CALIB_FIX_K5 | cv2.CALIB_FIX_K6
+                | cv2.CALIB_FIX_TANGENT_DIST)
+
+
+def test_a3_m8_freeze_protocol_flags_and_m2_unchanged(monkeypatch):
+    """A3 冻结协议(2026-10-24 追加轮):M8(产线 D 8 长)切片重标 flags 必含
+    FIX_K1..K6|FIX_TANGENT_DIST——全自由切片重拟合在 rational 近简并谷下 fx
+    弱可辨识(沿谷漂移,cam2 外圈曾读出 fx 2021 假信号),冻结后 fx 是唯一
+    自由的场依赖信号(真实数据实测 cam1 0.157%/cam2 0.199%,锚点 fx 全落)。
+    同轮锁定:A4 探针零改动(不带冻结位);M2(D 5 长)A3 flags 逐位等于
+    USE_INTRINSIC_GUESS(协议零改动)。
+    """
+    import stereo_calib.intrinsic.diagnostics as diag_mod
+
+    captured: list[tuple[int, int]] = []  # (传入 D 长度, flags)
+    real_fit = cv2.calibrateCameraExtended
+
+    def spy_fit(*args, **kwargs):
+        captured.append((int(np.asarray(args[4]).size), int(kwargs.get("flags", 0))))
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(diag_mod.cv2, "calibrateCameraExtended", spy_fit)
+    cfg5 = IntrinsicDiagnosticsConfig(a3_min_frames=5)
+
+    # ---- M8:D 8 长 → A3 冻结 D,A4 探针零改动 ----
+    uv8 = _synth_uv(_D8_RATIONAL, 24, seed=11)
+    captured.clear()
+    report8 = run_battery(uv8, _OBJP, _K_TRUE, _D8_RATIONAL, _SIZE, cfg5)
+    a3_calls = [f for dlen, f in captured if dlen == 8 and f & _FREEZE_BITS == _FREEZE_BITS]
+    a4_calls = [f for dlen, f in captured if dlen == 8 and f & _FREEZE_BITS == 0]
+    assert len(a3_calls) >= 4, "M8 下 A3 切片重标调用必须带全冻结位"
+    for f in a3_calls:
+        assert f & cv2.CALIB_RATIONAL_MODEL and f & cv2.CALIB_USE_INTRINSIC_GUESS, (
+            "M8 A3 冻结协议须同时带 RATIONAL(与产线同阶)+ USE_INTRINSIC_GUESS")
+    assert a4_calls and all(f & cv2.CALIB_RATIONAL_MODEL for f in a4_calls), (
+        "A4 探针(rational 全自由重标)必须照常存在且不带冻结位(A1/A0/A2/A4 一律不动)")
+    assert report8.verdict == "可靠", f"M8 一致真值 + 冻结协议不许误判:{report8.red_names}"
+    a3 = next(c for c in report8.checks if c.name == "A3")
+    assert a3.value is not None and a3.red is False
+    for sub in a3.detail.values():
+        fx_rel = abs(sub["fx"] - _K_TRUE[0, 0]) / _K_TRUE[0, 0]
+        assert fx_rel < 5e-3, (
+            f"冻结协议下切片 fx 必须钉在产线值邻域(切片 fx {sub['fx']:.2f} 偏 "
+            f"{fx_rel:.3%})——这是冻结协议的价值判据(全自由会沿谷漂移)")
+
+    # ---- M2:D 5 长 → A3 flags 逐位等于 USE_INTRINSIC_GUESS(零改动)----
+    uv5 = _synth_uv(_D5_TRUE, 24, seed=11)
+    captured.clear()
+    run_battery(uv5, _OBJP, _K_TRUE, _D5_TRUE, _SIZE, cfg5)
+    m2_a3 = [f for dlen, f in captured
+             if dlen == 5 and not (f & cv2.CALIB_RATIONAL_MODEL)]
+    assert len(m2_a3) >= 4, "M2 下 A3 切片重标调用必须照常存在"
+    assert all(f == int(cv2.CALIB_USE_INTRINSIC_GUESS) for f in m2_a3), (
+        "M2 A3 协议零改动:flags 必须逐位等于 USE_INTRINSIC_GUESS(无冻结位)")
+    assert any(f & cv2.CALIB_RATIONAL_MODEL for _, f in captured if _ == 5), (
+        "M2 下 A4 升阶探针(rational)必须照常存在")
+
+
 def test_battery_a4_probe_failure_notes_not_red(monkeypatch):
     """A4 探针失败路径:rational 重标抛 cv2.error → 判定量 None + note、
     不计红,其余检查不受影响(verdict 仍由真实判定量决定)。"""
