@@ -106,8 +106,12 @@ def write_extrinsics_stereo_json(path: Path | str, ref_cam: int, R, t, rvec,
         f"旋转矩阵必须 3×3,实际是 {r_arr.shape}。请检查求解层输出。")
 
     def _norm_flip(entry: dict) -> dict:
+        # auto_dropped:自适应软剔除(基于相对位姿离散度)自动剥离的翻转/孪生解离群对,
+        # 与 pairs(180° 消歧翻转对)同为 flip_log 的留痕字段,不可在归一化时丢弃——
+        # 否则磁盘 JSON 查不到被自动剔除的是哪对(留痕意图落空)。
         return {"pass2_flipped": int(entry.get("pass2_flipped", 0)),
-                "pairs": [str(x) for x in entry.get("pairs", [])]}
+                "pairs": [str(x) for x in entry.get("pairs", [])],
+                "auto_dropped": [str(x) for x in entry.get("auto_dropped", [])]}
 
     payload = {
         "ref_cam": int(ref_cam),
