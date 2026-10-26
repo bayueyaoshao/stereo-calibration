@@ -240,29 +240,45 @@ def pnp_median(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
 
 
 # ---------------------------------------------------------------------------
-# 两遍法消歧(参考 cli/05_extrinsic_multi.py 排序规范化,锚改两遍法自洽)
+# 180° 角点序消歧:跨对相对位姿 t+R 联合聚类(主) + 单对投影自洽(fallback)
+# 升级自原两遍法单对投影自洽;借鉴 four_eyed_vision/lib/run_all.py stage5
 # ---------------------------------------------------------------------------
+
+# 消歧聚类参数(取自 four_eyed_vision/lib/config.py 的实测值)
+_DISAMB_DELTA_MM = 30.0      # 相对位姿平移聚类阈值(rig 刚性,t 跨对应近常数)
+_DISAMB_DEG = 3.0            # 相对旋转聚类阈值(正/反序旋转差→联合 t+R 分离镜像)
+_DISAMB_ROT_W = 50.0         # 选序时旋转角相对平移的权重(dn=‖t−t_true‖+W·∠R)
+_DISAMB_MIN_CLUSTER = 4      # 最大簇内点数下限,低于此回落 fallback
+
+
+def _rangle(Ra: np.ndarray, Rb: np.ndarray) -> float:
+    """相对旋转角(度),消歧 t+R 联合聚类的旋转度量。"""
+    return float(np.degrees(np.arccos(np.clip((np.trace(Ra.T @ Rb) - 1) / 2, -1, 1))))
 
 
 def disambiguate_pairs(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
                        init: StereoInit, flip_ratio: float) -> tuple[Pairs, dict]:
-    """180° 角点序消歧(两遍法 pass-1→pass-2 的中间步):证据充分才翻。
+    """180° 角点序消歧:跨对相对位姿 t+R 联合聚类(主) + 单对投影自洽(fallback)。
 
-    白话:棋盘有 180° 旋转对称,两台相机视角不同,Phase 1 的单图规范序
-    不保证跨相机物理同一性——某一路的角点序可能整体反了。拿 pass-1 的
-    外参 + 每对该路自身的 PnP 位姿当锚,把物点投影到该相机,比较「原始
-    序 / 反转序」谁的投影误差小;反转序误差 < flip_ratio × 原始序误差才翻
-    (决策 3:证据充分才翻,防边界帧误翻,Pitfall 11)。
+    升级说明(2026-10-26):原实现是「两遍法单对投影自洽」——用 pass-1 中位
+    外参当锚,对每对独立比较「原始序/翻转序」重投影误差,`e_rev < flip_ratio
+    ·e_fwd` 才翻。该判据对接近对称的棋盘会漏判(两种序误差差别不够大),本次
+    新数据 20261026_175009_264608 即因此漏翻,触发离散度防线。
 
-    锚自洽性(为什么不依赖 Phase 2 位姿产物,Pitfall 12:实测 7/112 对缺
-    cam1 锚):pass-1 中位外参由多数正确对撑起(中位数对少数翻转对鲁棒),
-    cam2 的锚是"多数帧共识";若 cam1 自身角点序整体翻转,PnP 解出的是
-    180° 转板位姿,两路一致地消歧到同一物理约定,而最终指标(板系对角
-    距离)对整体翻转不变(角点 0↔87 互换,距离相同)。
+    现改为借鉴 four_eyed_vision 的「相对位姿跨对应为常数(刚体)」联合聚类:
+      1) cam1 锁原序(world 系约定,杜绝跨对 180° 世界系歧义;原实现 cam1
+         锚即自身解数学上恒不翻,此处显式锁死,行为等价);
+      2) 对每对 cam2 枚举正/反序 PnP → 相对位姿候选(relative_pose);
+      3) 全部候选做 t+R 联合聚类(平移<30mm 且旋转<3°),取最大一致簇为真值
+         (R 取簇内 Rodrigues 向量中位数、t 取均值,复用本工程中位数聚合习惯);
+      4) 每对选与真值(‖t−t_true‖ + 50·∠R)更近的序翻。
+    此法用全体对投票,单对边界模糊时不再漏判。
 
-    返回:(消歧后的新 Pairs(翻转对取 arr[::-1].copy(),绝不原地改),
-    flip_log dict {"pass2_flipped": int, "pair_ids": [...]})(留痕不静默,
-    T-03-06)。规则是纯函数:同输入同输出,无随机性。
+    fallback:有效对过少致最大簇 < 4 时,回落到旧单对投影自洽逻辑(仍受
+    flip_ratio 约束),保证小数据/异常场景行为不变(向后兼容)。
+
+    纯函数:同输入同输出,无随机性。返回(消歧后的新 Pairs, flip_log
+    {"pass2_flipped","pair_ids","method"})。绝不原地改输入 Pairs(T-03-06)。
     """
     if not 0 < flip_ratio <= 1.0:
         # 配置层已校验;此处防线自证(函数独立调用时不带病运行)
@@ -270,43 +286,87 @@ def disambiguate_pairs(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsVie
             f"消歧判定阈值不合法:期望 0 到 1.0 之间(含上端点)的数,实际是 "
             f"{flip_ratio!r}。超过 1.0 即证据不足也翻(Pitfall 11)。"
         )
-    params1 = np.asarray(intr1.params, dtype=np.float64).ravel()
     params2 = np.asarray(intr2.params, dtype=np.float64).ravel()
     objp = np.asarray(pairs.objp, dtype=np.float64)
-    uv1 = np.array(pairs.uv1, dtype=np.float64)  # 拷贝后修改:输入 Pairs 保持只读
+    objp32 = objp.astype(np.float32).reshape(-1, 1, 3)
+    k2 = np.asarray(intr2.K, dtype=np.float64)
+    d2 = np.asarray(intr2.D, dtype=np.float64).ravel().reshape(-1, 1)
+    # cam1 锁原序:uv1 永不改;uv2 拷贝后按需翻转
     uv2 = np.array(pairs.uv2, dtype=np.float64)
 
-    flipped_ids: list[str] = []
-    for j, gid in enumerate(pairs.image_ids):
+    # ---- 构造相对位姿候选(每对 cam2 正/反序;cam1 锁正序) ----
+    candidates: list[tuple[np.ndarray, np.ndarray, int, bool]] = []
+    valid: list[int] = []
+    for j, _gid in enumerate(pairs.image_ids):
         if not init.per_pair_ok[j]:
             continue  # 该对 pass-1 PnP 失败、无锚:不翻,留给剔除机制处置
-        R1, _ = cv2.Rodrigues(init.rvecs1[j])
-        xw = (R1 @ objp.T).T + init.tvecs1[j]  # 板 → cam1(该对自身 PnP 位姿)
+        valid.append(j)
+        R1, _ = cv2.Rodrigues(np.asarray(init.rvecs1[j], dtype=np.float64).ravel())
+        t1 = np.asarray(init.tvecs1[j], dtype=np.float64).ravel()
+        R2, _ = cv2.Rodrigues(np.asarray(init.rvecs2[j], dtype=np.float64).ravel())
+        t2 = np.asarray(init.tvecs2[j], dtype=np.float64).ravel()
+        Rn, tn = relative_pose(R1, t1, R2, t2)        # cam2 正序候选
+        candidates.append((Rn, tn, j, False))
+        try:                                          # cam2 反序候选:翻转 uv2 重 PnP
+            ok_f, rv2f, tv2f = cv2.solvePnP(
+                objp32, uv2[j][::-1].astype(np.float32).reshape(-1, 1, 2),
+                k2, d2, flags=cv2.SOLVEPNP_ITERATIVE)
+            if ok_f:
+                R2f, _ = cv2.Rodrigues(np.asarray(rv2f, dtype=np.float64).ravel())
+                t2f = np.asarray(tv2f, dtype=np.float64).ravel()
+                Rf, tf = relative_pose(R1, t1, R2f, t2f)
+                candidates.append((Rf, tf, j, True))
+        except _PNP_EXC:
+            pass
 
-        # cam1:锚即自身解,数学上恒不翻;照判保对称(参考 06 对含锚在内的
-        # 所有路都消歧,锚自洽时是无害的恒等操作)
-        proj1 = models.project(xw, params1)
-        e_fwd = float(np.linalg.norm(proj1 - uv1[j]))
-        e_rev = float(np.linalg.norm(proj1 - uv1[j][::-1]))
-        if e_rev < flip_ratio * e_fwd:
-            uv1[j] = uv1[j][::-1].copy()
-            flipped_ids.append(gid)
+    # ---- 主路径:中位数共识消歧(对少数翻转离群稳健,无对称平局) ----
+    # 默认"多数对的 cam2 正序正确",故取全部 cam2 正序相对位姿的中位数作共识;
+    # 逐对比较其正/反序相对位姿与共识的(平移+旋转)距离,反序更近则翻。
+    # 中位数对单峰数据中的少数翻转离群稳健(翻转对<半数时共识始终正确),
+    # 不似 t+R 联合聚类在"恰好半数翻转"时因两簇对称而平局退化(本数据即此例)。
+    flipped_cam2: set[int] = set()
+    use_cluster = False
+    fwd = [c for c in candidates if not c[3]]   # 全部 cam2 正序候选
+    if len(fwd) >= _DISAMB_MIN_CLUSTER:
+        Rs_fwd = np.array([cv2.Rodrigues(c[0])[0].ravel() for c in fwd])
+        ts_fwd = np.array([c[1] for c in fwd])
+        R_cons = cv2.Rodrigues(np.median(Rs_fwd, axis=0).reshape(3, 1))[0]
+        t_cons = np.median(ts_fwd, axis=0)
+        use_cluster = True
+        for j in valid:
+            cn = next(c for c in candidates if c[2] == j and not c[3])
+            cf = next((c for c in candidates if c[2] == j and c[3]), None)
+            if cf is None:
+                continue
+            dn = np.linalg.norm(cn[1] - t_cons) + _DISAMB_ROT_W * _rangle(cn[0], R_cons)
+            df = np.linalg.norm(cf[1] - t_cons) + _DISAMB_ROT_W * _rangle(cf[0], R_cons)
+            if df < dn:
+                flipped_cam2.add(j)
 
-        # cam2:锚 = pass-1 外参组合(X_cam2 = R_rel @ X_cam1 + t_rel 预测
-        # cam2 系坐标,再按该路内参投影)
-        x2 = xw @ init.R.T + init.t
-        proj2 = models.project(x2, params2)
-        e_fwd = float(np.linalg.norm(proj2 - uv2[j]))
-        e_rev = float(np.linalg.norm(proj2 - uv2[j][::-1]))
-        if e_rev < flip_ratio * e_fwd:
-            uv2[j] = uv2[j][::-1].copy()
-            if gid not in flipped_ids:
-                flipped_ids.append(gid)
+    if not use_cluster:
+        # ---- fallback:旧单对投影自洽(向后兼容) ----
+        for j in valid:
+            R1, _ = cv2.Rodrigues(np.asarray(init.rvecs1[j], dtype=np.float64).ravel())
+            t1 = np.asarray(init.tvecs1[j], dtype=np.float64).ravel()
+            xw = (R1 @ objp.T).T + t1
+            x2 = xw @ init.R.T + init.t          # cam2 锚 = pass-1 中位外参
+            proj2 = models.project(x2, params2)
+            e_fwd = float(np.linalg.norm(proj2 - uv2[j]))
+            e_rev = float(np.linalg.norm(proj2 - uv2[j][::-1]))
+            if e_rev < flip_ratio * e_fwd:
+                flipped_cam2.add(j)
 
+    # cam1 锁原序:不翻 uv1;仅翻转标记过的 cam2 对
+    for j in flipped_cam2:
+        uv2[j] = uv2[j][::-1].copy()
+
+    flipped_ids = [pairs.image_ids[j] for j in sorted(flipped_cam2)]
     pairs_out = Pairs(image_ids=pairs.image_ids, source1=pairs.source1,
                       source2=pairs.source2, routes=pairs.routes,
-                      uv1=uv1, uv2=uv2, objp=pairs.objp)
-    return pairs_out, {"pass2_flipped": len(flipped_ids), "pair_ids": flipped_ids}
+                      uv1=np.array(pairs.uv1, dtype=np.float64), uv2=uv2,
+                      objp=pairs.objp)
+    return pairs_out, {"pass2_flipped": len(flipped_ids), "pair_ids": flipped_ids,
+                       "method": "median_consensus" if use_cluster else "fallback_proj"}
 
 
 # ---------------------------------------------------------------------------
