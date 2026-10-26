@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 
 import cv2
 import numpy as np
@@ -33,11 +33,16 @@ from scipy.sparse import coo_matrix, csr_matrix
 from stereo_calib.intrinsic import models
 from stereo_calib.intrinsic.solve import _is_practically_converged, _tail_improvement
 from stereo_calib.io.config import StereoCalibConfig, StereoRefineConfig
-from stereo_calib.stereo.observation import IntrinsicsView, Pairs
+from stereo_calib.stereo.observation import IntrinsicsView, Pairs, select_pairs
 
 # solvePnP 逐对调用的数值异常家族收口(scoring.py 同款体例):失败对按单对
 # 失败记录(跳过不入堆叠),绝不抛异常中断整批、更绝不填 NaN 进聚合。
 _PNP_EXC = (ValueError, ArithmeticError, RuntimeError, AssertionError, cv2.error)
+
+# 自适应软剔除:基于相对位姿离散度自动排除翻转/孪生解离群对(替代 fail-closed 中断)。
+# 正常对离散度 <1°,翻转/孪生解对 ~180°,30° 阈值与正常区间有本质间隔,几乎不误剔正常对。
+_SOFT_DROP_SPREAD_DEG = 30.0
+_SOFT_DROP_MAX_DEPTH = 3
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,8 @@ class StereoInit:
     per_pair_ok: tuple[bool, ...]
     spread_deg: float
     n_valid: int
+    pair_spread_deg: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
 
 
 def relative_pose(R_a: np.ndarray, t_a: np.ndarray,
@@ -236,7 +243,8 @@ def pnp_median(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
         rotation_angle_deg=float(np.degrees(np.linalg.norm(rv_med))),
         rvecs1=rvecs1, tvecs1=tvecs1, rvecs2=rvecs2, tvecs2=tvecs2,
         per_pair_rms=per_pair_rms, per_pair_ok=tuple(per_pair_ok),
-        spread_deg=spread_deg, n_valid=n_valid)
+        spread_deg=spread_deg, n_valid=n_valid,
+        pair_spread_deg=np.asarray(dev_deg, dtype=np.float64))
 
 
 # ---------------------------------------------------------------------------
@@ -684,23 +692,56 @@ def refine_stereo(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
 
 
 def solve_stereo(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
-                 cfg: StereoCalibConfig) -> StereoResult:
+                 cfg: StereoCalibConfig,
+                 _auto_dropped: list[str] | None = None) -> StereoResult:
     """双目求解编排入口(03-03 唯一消费它):全配置进、终解出。
 
     内部两遍法管线:pass-1 pnp_median(原始角点,离散度防线关——翻转对
     未消歧时离散度高恰恰是消歧要修的东西)→ disambiguate_pairs(配置
-    flip_ratio)→ pass-2 pnp_median(消歧后角点,离散度防线按配置)→
+    flip_ratio)→ pass-2 pnp_median(消歧后角点,离散度自行计算)→
     cfg.stereo.refine.enabled 时 refine_stereo,否则直接组装初值版
     StereoResult(solver 如实标 "pnp_median")。剔除循环内的 fast 路径由
     03-03 先 deepcopy 配置置 refine.enabled=False 再入(精化不进循环)。
     flip_log 顶层固定含 "train" 键(本函数即 train 侧语义;test 侧不调它),
-    结构 {"train": {"pass2_flipped": int, "pair_ids": [...]}}。
+    结构 {"train": {"pass2_flipped": int, "pair_ids": [...], "method": ...,
+    "auto_dropped": [...]}}。
+
+    自适应软剔除(2026-10-26 增补):pass-2 逐对相对位姿离散度(相对中位夹角,
+    见 StereoInit.pair_spread_deg)若 > 阈值(默认 30°,正常对 <1°、翻转/
+    孪生解对 ~180°,间隔本质,几乎不误剔),自动将该对排除后重算,让 pipeline
+    全自动跑通(无需手工 exclude_pairs)。最后仍保留原 fail-closed 防线:软剔除
+    后若离散度仍超 median_spread_max_deg,说明多翻转对或误判,如实报错而非
+    静默出坏解。_auto_dropped 为递归累积的被软剔除对清单(留痕进 flip_log)。
     """
+    if _auto_dropped is None:
+        _auto_dropped = []
     stereo = cfg.stereo
     pass1 = pnp_median(pairs, intr1, intr2, None)
     pairs2, flip = disambiguate_pairs(pairs, intr1, intr2, pass1, stereo.flip_ratio)
-    pass2 = pnp_median(pairs2, intr1, intr2, stereo.median_spread_max_deg)
+    pass2 = pnp_median(pairs2, intr1, intr2, None)  # 关防线,离散度自行算
     flip_log = {"train": flip}
+
+    # 自适应软剔除:基于相对位姿离散度自动排除翻转/孪生解离群对
+    if len(_auto_dropped) < _SOFT_DROP_MAX_DEPTH:
+        dev = pass2.pair_spread_deg
+        bad = [j for j, d in enumerate(dev) if d > _SOFT_DROP_SPREAD_DEG]
+        if bad:
+            keep = [j for j in range(len(pairs.image_ids)) if j not in set(bad)]
+            if len(keep) >= 2:
+                for j in bad:
+                    _auto_dropped.append(pairs.image_ids[j])
+                sub = select_pairs(pairs, keep)
+                return solve_stereo(sub, intr1, intr2, cfg, _auto_dropped)
+
+    # 保留原 fail-closed 防线:软剔除后若仍超阈,说明异常,如实报警
+    if (stereo.median_spread_max_deg is not None
+            and pass2.spread_deg > stereo.median_spread_max_deg):
+        raise ValueError(
+            f"双目初值离散度防线触发:逐对相对位姿相对中位的最大夹角实测 "
+            f"{pass2.spread_deg:.4f}°,超过配置阈值 {stereo.median_spread_max_deg}°——可能存在"
+            f"180° 角点序翻转帧或共面孪生解污染(Rodrigues 向量中位数对多峰"
+            f"数据失效)。请检查消歧流程是否执行、以及逐对 RMS 诊断。"
+        )
 
     if not all(pass2.per_pair_ok):
         failed = [gid for gid, ok in zip(pairs.image_ids, pass2.per_pair_ok) if not ok]
@@ -710,6 +751,7 @@ def solve_stereo(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
             f"加入 stereo.exclude_pairs 手动剔除清单,或检查角点数据质量。"
         )
 
+    flip_log["train"] = {**flip, "auto_dropped": list(_auto_dropped)}
     if stereo.refine.enabled:
         return replace(refine_stereo(pairs2, intr1, intr2, pass2, stereo.refine),
                        flip_log=flip_log)

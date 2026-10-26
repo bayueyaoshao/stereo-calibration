@@ -204,6 +204,15 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         survivors = [i for i in range(len(train.image_ids)) if i not in set(dropped_idx)]
         train_survivors = select_pairs(train, survivors)
         final = solve_stereo(train_survivors, intr1, intr2, cfg)  # 精化只此一次
+        # 自适应软剔除(基于相对位姿离散度)的对需从评估/报告中同步排除,
+        # 否则会用剔除后的位姿去评估被剔除对 → 距离残差虚高(假象)
+        _sd = list(final.flip_log.get("train", {}).get("auto_dropped", []))
+        if _sd:
+            _sd_set = set(_sd)
+            _used_idx = [i for i, _g in enumerate(train_survivors.image_ids) if _g not in _sd_set]
+            train_used = select_pairs(train_survivors, _used_idx)
+        else:
+            train_used = train_survivors
         typer.echo(f"  train 定稿:幸存 {len(survivors)}/{len(train.image_ids)} 对,"
                    f"重投影 pooled RMS {final.rms_reproj:.4f}px,"
                    f"baseline {final.baseline_mm:.2f} mm,solver={final.solver}")
@@ -245,7 +254,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         typer.echo(f"  test 评估失败,降级留痕(train 产物不受影响):{test_error}")
     train_error = ""
     try:
-        train_eval = evaluate_split(train_survivors, intr1, intr2, final.R, final.t,
+        train_eval = evaluate_split(train_used, intr1, intr2, final.R, final.t,
                                     cfg.board, stereo.flip_ratio)
     except _SEGMENT_EXC as e:
         train_eval = None
@@ -270,7 +279,8 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
     train_flip = final.flip_log.get("train", {})
     flip_log = {
         "train": {"pass2_flipped": int(train_flip.get("pass2_flipped", 0)),
-                  "pairs": [str(x) for x in train_flip.get("pair_ids", [])]},
+                  "pairs": [str(x) for x in train_flip.get("pair_ids", [])],
+                  "auto_dropped": [str(x) for x in train_flip.get("auto_dropped", [])]},
         "test": {"pass2_flipped": 0, "pairs": []},
     }
     if test_rows:
@@ -294,7 +304,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         stereo_root / "extrinsics_stereo.json", ref_cam=1, R=final.R, t=final.t,
         rvec=final.rvec, rotation_angle_deg=final.rotation_angle_deg,
         baseline_mm=final.baseline_mm, K1=intr1.K, D1=intr1.D,
-        K2=intr2.K, D2=intr2.D, n_pairs_train=len(survivors),
+        K2=intr2.K, D2=intr2.D, n_pairs_train=len(train_used.image_ids),
         n_pairs_test=len(test.image_ids), rms_reproj_train=final.rms_reproj,
         rms_reproj_test=rms_reproj_test,
         distance_rms_train_mm=distance_rms_train,
@@ -360,7 +370,7 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
         "distance_rms_train_mm": distance_rms_train,
         "distance_rms_test_mm": distance_rms_test,
         "true_distance_mm": true_distance,
-        "n_pairs_train": len(survivors),
+        "n_pairs_train": len(train_used.image_ids),
         "n_pairs_train_initial": len(train.image_ids),
         "n_pairs_test": len(test.image_ids),
         "train_evals": [
@@ -389,8 +399,9 @@ def run_stereo(cfg: StereoCalibConfig) -> None:
 
     # ---- 中文汇总:指标 + PASS/FAIL(报告结论非退出条件)+ 产物绝对路径 ----
     typer.echo("双目标定完成,产物已写盘:")
-    typer.echo(f"  对数:train 幸存 {len(survivors)}/{len(train.image_ids)}"
-               f"(剔除 {len(dropped)})、test {len(test.image_ids)}")
+    typer.echo(f"  对数:train 幸存 {len(train_used.image_ids)}/{len(train.image_ids)}"
+               f"(RMS 剔除 {len(train.image_ids) - len(survivors)} + 软剔除 "
+               f"{len(survivors) - len(train_used.image_ids)})、test {len(test.image_ids)}")
     typer.echo(f"  重投影 RMS:train {final.rms_reproj:.4f}px、"
                f"test {rms_reproj_test:.4f}px")
     typer.echo(f"  距离 RMS:train {distance_rms_train:.4f} mm、"
