@@ -34,6 +34,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 > 生产实证(quick 261024-rational8-production 追加轮,M8+洗盆内参):train 距离 RMS 0.2321mm / test 0.2001mm(阈值 5mm PASS),baseline 798.11mm,180° 翻转 0,剔除 0 对,SC1-SC4 全过,退出码 0。
 
+### 模块4 — 测量精度验证 (VALID,quick 261026-validation-module 增补)
+
+- [x] **VALID-01**: `stereo-calib validate` 漂移体检:消费冻结标定产物(两路 intrinsics.json + extrinsics_stereo.json,绝不重拟合),对 validation.data_dir 同步图像对走既有 preprocess 检测链,冻结模式(R/t 存档 DLT 三角化)测棋盘对角距离偏差判系统漂移,逐对 PnP 模式归因;区域分桶精度分布;双红线闸门(|平均偏差|/RMS,fail-closed 退出码 1);validation.json + 中文 report.md(判读矩阵)落盘
+
+> 生产实证(2026-10-26,data/val 1 组):verdict PASS,冻结偏差 |−0.2396|mm(红线 1.0)/ RMS 0.2396mm(红线 2.0),逐对 +0.0141mm,重投影 RMS 0.0384px,检出路线 SB/SB,180° 翻转 0,退出码 0——v1.0 定稿参数无系统漂移。
+
 ### 工程基础 (INFRA)
 
 - [x] **INFRA-01**: 三个模块独立 CLI 入口,可单独运行调试,上游输出即下游输入,文件接口明确
@@ -78,16 +84,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STER-02 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; baseline 798.11mm) |
 | STER-03 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; test 距离 RMS 0.2001mm ≪ 5mm) |
 | STER-04 | Phase 3 | Complete (quick 261024-rational8-production 追加轮; report.md 双目节) |
+| VALID-01 | quick 261026-validation-module 增补 | Complete (stereo-calib validate 全链 + 38 测试; 生产: 冻结偏差 0.2396mm PASS) |
 | INFRA-01 | Phase 1 | Complete |
 | INFRA-02 | Phase 1 | Complete |
 | INFRA-03 | Phase 1 | Complete (01-03) |
 
 **Coverage:**
 
-- v1 requirements: 19 total
-- Mapped to phases: 19 ✓
+- v1 requirements: 19 total + 1 增补 (VALID-01)
+- Mapped to phases: 20 ✓
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-10-23*
-*Last updated: 2026-10-24 after quick 261024-rational8-production 追加轮 (M8 洗盆落盆后:两相机体检 reliable 全绿 fx=2037.04/2037.52,双目 SC1-SC4 全过 test 距离 RMS 0.2001mm,STER-01..04 complete;前次 2026-10-24 after quick 261024-rational8-production:M8 全链支持,cam1 体检转绿/cam2 honest-stop;前次 2026-10-24 after quick 261024-intrinsic-adequacy-battery:INTR-05 增补,双机判不可靠;前次 02-04:INTR-01..04 complete,两路 test RMS 0.1407/0.1361px)*
+*Last updated: 2026-10-26 after quick 261026-validation-module (VALID-01 增补:stereo-calib validate 漂移体检全链,生产 data/val 实跑 PASS 冻结偏差 0.2396mm;前次 2026-10-24 after quick 261024-rational8-production 追加轮:M8 洗盆落盆后两相机体检 reliable 全绿 fx=2037.04/2037.52,双目 SC1-SC4 全过 test 距离 RMS 0.2001mm,STER-01..04 complete;前次 2026-10-24 after quick 261024-rational8-production:M8 全链支持,cam1 体检转绿/cam2 honest-stop;前次 2026-10-24 after quick 261024-intrinsic-adequacy-battery:INTR-05 增补,双机判不可靠;前次 02-04:INTR-01..04 complete,两路 test RMS 0.1407/0.1361px)*

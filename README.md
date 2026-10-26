@@ -1,11 +1,12 @@
 # 双目相机标定生产工具 (stereo-calibration)
 
-基于已采集的同步双目图像对(data/train 188 组、data/test 15 组,cam1.jpg/cam2.jpg)计算可靠的双目相机标定结果。三个独立模块:数据预处理(角点检测与筛选)、单相机内参标定与体检、双目外参标定与验证。
+基于已采集的同步双目图像对(data/train 188 组、data/test 15 组,cam1.jpg/cam2.jpg)计算可靠的双目相机标定结果。四个独立模块:数据预处理(角点检测与筛选)、单相机内参标定与体检、双目外参标定与验证、测量精度验证(系统漂移体检)。
 
 ```bash
 uv run stereo-calib preprocess   # 模块1:角点检测
 uv run stereo-calib intrinsic    # 模块2:内参 + 模型充分性体检(fail-closed)
 uv run stereo-calib stereo       # 模块3:双目外参 + SC1-4 验收
+uv run stereo-calib validate     # 模块4:测量精度验证(漂移体检,消费冻结产物)
 ```
 
 ---
