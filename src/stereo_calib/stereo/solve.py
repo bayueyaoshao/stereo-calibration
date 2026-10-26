@@ -33,7 +33,7 @@ from scipy.sparse import coo_matrix, csr_matrix
 from stereo_calib.intrinsic import models
 from stereo_calib.intrinsic.solve import _is_practically_converged, _tail_improvement
 from stereo_calib.io.config import StereoCalibConfig, StereoRefineConfig
-from stereo_calib.stereo.observation import IntrinsicsView, Pairs
+from stereo_calib.stereo.observation import IntrinsicsView, Pairs, solve_view_pose
 
 # solvePnP 逐对调用的数值异常家族收口(scoring.py 同款体例):失败对按单对
 # 失败记录(跳过不入堆叠),绝不抛异常中断整批、更绝不填 NaN 进聚合。
@@ -130,13 +130,9 @@ def pnp_median(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
             f"{median_spread_max_deg!r}。请检查 stereo.median_spread_max_deg 配置。"
         )
 
-    # dtype 纪律(Pitfall 7):点位 float32、K/D float64 reshape(-1,1)——
-    # 参考工程实测的合法组合,装包规则集中在调用处显式完成。
-    objp32 = objp.astype(np.float32).reshape(-1, 1, 3)
-    k1 = np.asarray(intr1.K, dtype=np.float64)
-    d1 = np.asarray(intr1.D, dtype=np.float64).ravel().reshape(-1, 1)
-    k2 = np.asarray(intr2.K, dtype=np.float64)
-    d2 = np.asarray(intr2.D, dtype=np.float64).ravel().reshape(-1, 1)
+    # dtype 纪律(Pitfall 7):OpenCV 绑定侧的 float32 装包与 K/D 的 (-1,1)
+    # reshape 集中在 solve_view_pose 内部完成(唯一住址),本函数只消费
+    # float64 的 params 走 models(单一数学源)。
     params1 = np.asarray(intr1.params, dtype=np.float64).ravel()
     params2 = np.asarray(intr2.params, dtype=np.float64).ravel()
 
@@ -153,12 +149,10 @@ def pnp_median(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
         ok_pair = True
         rv_a = tv_a = rv_b = tv_b = None
         try:
-            ok_a, rv_a, tv_a = cv2.solvePnP(
-                objp32, uv1[j].astype(np.float32).reshape(-1, 1, 2),
-                k1, d1, flags=cv2.SOLVEPNP_ITERATIVE)
-            ok_b, rv_b, tv_b = cv2.solvePnP(
-                objp32, uv2[j].astype(np.float32).reshape(-1, 1, 2),
-                k2, d2, flags=cv2.SOLVEPNP_ITERATIVE)
+            # PnP 按模型分派的唯一住址(observation.solve_view_pose):针孔族喂
+            # 带畸变原始像素;鱼眼族 M4 走自家精确反投影 + 切平面坐标。
+            ok_a, rv_a, tv_a = solve_view_pose(objp, uv1[j], intr1)
+            ok_b, rv_b, tv_b = solve_view_pose(objp, uv2[j], intr2)
             if not (ok_a and ok_b):
                 ok_pair = False
         except _PNP_EXC:

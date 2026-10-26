@@ -73,14 +73,15 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
     字段层级(与 RESEARCH Pattern 7 逐字段一致;2026-10-24 增补 diagnostics
     与 distortion_model,只增不改既有字段):
         cam:               相机号(int);
-        distortion_model:  "M2" | "M8"(params/D 布局自述;读取方对缺该键的
+        distortion_model:  "M2" | "M8" | "M4"(params/D 布局自述;读取方对缺该键的
                            旧产物默认 M2,向后兼容);
         image_size:        [宽, 高],与标定同源口径;
         params:            按模型布局按名(M2 九参 fx/fy/cx/cy/k1/k2/p1/p2/k3;
-                           M8 十二参再加 k4/k5/k6);
+                           M8 十二参再加 k4/k5/k6;M4 八参 fx/fy/cx/cy/k1..k4);
         K:                 3×3 冗余存储(避免模块 3 重建出错);
         D:                 OpenCV dist 布局冗余存储(M2 5 长;M8 8 长
-                           [k1,k2,p1,p2,k3,k4,k5,k6]);
+                           [k1,k2,p1,p2,k3,k4,k5,k6];M4 4 长 [k1,k2,k3,k4]
+                           ——鱼眼与针孔的 D 不同义,必须凭本键解读);
         solver:            "opencv" | "scipy"(精化开关关闭时为前者);
         refine_enabled:    精化开关留痕;
         rms_train_overall / rms_test_overall:float64 回代 pooled RMS;
@@ -94,7 +95,10 @@ def write_intrinsics_json(path: Path | str, cam: int, image_size,
     """
     d_arr = np.asarray(D, dtype=np.float64).ravel()
     names = intrinsic_names(distortion_model)  # 模型名白名单防线(非法名中文报错)
-    expected_d = 5 if distortion_model == "M2" else 8
+    # D 长度 ↔ 布局对照表(M4 鱼眼 4 长 / M2 五长 / M8 rational 八长)。
+    # 三个长度互不相同,checkpoint 表在这里明示而非 if-else 逐写
+    # ——将来加布局只需加一行。
+    expected_d = {"M2": 5, "M8": 8, "M4": 4}[distortion_model]
     assert d_arr.shape == (expected_d,), (
         f"畸变向量必须恰 {expected_d} 长(模型 {distortion_model} 的 OpenCV "
         f"dist 布局 {names}),实际是 {d_arr.shape}。出现此错说明调用方传入的 "

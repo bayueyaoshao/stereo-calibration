@@ -187,11 +187,13 @@ def _calibrate_one_cam(cfg: StereoCalibConfig, cam: int,
     # 标量 RMS 看不出的畸变模型欠拟合(如 fx 被推高 11%)由 A0/A1/A3/A4
     # 揪出;数值与判定进 intrinsics.json 的 diagnostics 键(契约只增)与
     # report.md 体检节。verdict 在 run_intrinsic 收口(两路齐后再判)。
-    # D 传产线解全尾部(5 长 M2 / 8 长 M8,体检内部按长度分派)。
+    # model 与 D 必须配对传入(5 长 M2 / 8 长 M8 / 4 长 M4):体检内部按模型
+    # 选针孔或鱼眼套件,不许按长度猜语义。
     diag_report = run_battery(uvs_train, train.objp,
                               intrinsics_matrix(final.params),
                               np.asarray(final.params[4:], dtype=np.float64),
-                              train.image_size, cfg.intrinsic.diagnostics)
+                              train.image_size, cfg.intrinsic.diagnostics,
+                              model=model)
     diagnostics = diagnostics_to_dict(diag_report)
     for chk in diag_report.checks:
         value = "数据不足" if chk.value is None else f"{chk.value:.4f}"

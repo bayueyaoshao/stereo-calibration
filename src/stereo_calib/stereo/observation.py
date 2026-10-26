@@ -8,7 +8,8 @@
   preprocess.artifacts.load_corners——其 allow_pickle=False 防线已在
   Phase 1 测试锁定,本模块绝不直接调 numpy 的加载接口(T-03-01);
 - intrinsics.json(Phase 2):按名读,见 load_intrinsics(distortion_model
-  缺省按 M2 解释,向后兼容 2026-10-24 之前的旧产物)。
+  缺省按 M2 解释,向后兼容 2026-10-24 之前的旧产物;2026-10-26 起增补 M4
+  鱼眼:D 长 4 且语义为 θ 多项式 [k1,k2,k3,k4],与针孔族不同义)。
 
 连接键(Pattern 1 实测规则):npz 的 image_id = group_id + "_cam{n}"
 (实测形态 20261023_154025_519359_cam1)。逐 CSV 行按连接键在两路 npz 的
@@ -43,9 +44,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 
-from stereo_calib.intrinsic.models import INTRINSIC_NAMES, intrinsic_names
+from stereo_calib.intrinsic import models
+from stereo_calib.intrinsic.models import INTRINSIC_NAMES, intrinsic_names, is_fisheye
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points, load_corners
 
@@ -279,8 +282,8 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
 
     params 按模型布局名导航(禁魔数下标);distortion_model 键缺省按 "M2"
     解释(向后兼容增补前的旧产物),白名单外中文报错;优先直读 K/D 冗余
-    字段并按模型断言 D 形状(M2 (5,) / M8 (8,))(Pitfall 13 的布局错位
-    防护)。缺字段/形状不合均中文报错。
+    字段并按模型断言 D 形状(M2 (5,) / M8 (8,) / M4 (4,))(Pitfall 13 的
+    布局错位防护)。缺字段/形状不合均中文报错。
     """
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -296,11 +299,11 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
 
     # 畸变模型:缺省 M2(旧产物向后兼容);白名单外当场中文报错
     model = data.get("distortion_model", "M2")
-    if model not in ("M2", "M8"):
+    if model not in ("M2", "M8", "M4"):
         raise ValueError(
             f"内参文件 {Path(json_path).name} 不合法:distortion_model 是 "
-            f"{model!r},只支持 'M2'(五参 Brown-Conrady)或 'M8'(rational 8)。"
-            f"请重跑 stereo-calib intrinsic。"
+            f"{model!r},只支持 'M2'(五参 Brown-Conrady)、'M8'(rational 8) "
+            f"或 'M4'(鱼眼 KB4)。请重跑 stereo-calib intrinsic。"
         )
     names = INTRINSIC_NAMES if model == "M2" else intrinsic_names(model)
 
@@ -325,10 +328,11 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
             f"实际是 {K.shape}。请重跑 stereo-calib intrinsic。"
         )
     D = np.asarray(data["D"], dtype=np.float64).ravel()
-    expected_d = 5 if model == "M2" else 8
+    # D 长度 ↔ 布局:M2 恰五项、M8 恰八项、M4(鱼眼)恰四项。注意 4 长是同性
+    # 不同义的典型:针孔 cv2 调用会把 [k1,k2,k3,k4] 当成 [k1,k2,p1,p2] 且
+    # 一个数不报错——长度对不上/语义错位都必须在这里拦死(Pitfall 13)。
+    expected_d = {"M2": 5, "M8": 8, "M4": 4}[model]
     if D.shape != (expected_d,):
-        # 布局错位防护:M2 恰五项、M8 恰八项,长度对不上都说明写侧坏掉,
-        # 静默塞错切向/径向比报错可怕得多(Pitfall 13)
         raise ValueError(
             f"内参文件 {Path(json_path).name} 不合法:D 的形状应当是 "
             f"({expected_d},)(模型 {model} 的 OpenCV dist 布局),"
@@ -344,3 +348,47 @@ def load_intrinsics(json_path: Path | str) -> IntrinsicsView:
     image_size = (int(image_size_raw[0]), int(image_size_raw[1]))
     return IntrinsicsView(cam=int(data["cam"]), image_size=image_size,
                           params=params, K=K, D=D, model=model)
+
+
+def solve_view_pose(objp: np.ndarray, uv: np.ndarray, intr: IntrinsicsView
+                    ) -> tuple[bool, np.ndarray | None, np.ndarray | None]:
+    """按相机模型套件估单帧位姿——模块3 里一切「逐帧 PnP」的唯一住址。
+
+    为什么要集中:这正是鱼眼(M4)与针孔(M2/M8)会分道扬镳的地方,分散到各
+    调用处写就一定会有人在某处忘记分派。
+
+      M2/M8(针孔族):cv2.solvePnP(带畸变原始像素 + K/D)——畸变由 OpenCV 在
+          PnP 内部处理,float32 装包规则照 Pitfall 7;
+      M4(鱼眼族):**不**用 cv2.fisheye.solvePnP——它内部走迭代近似逆,强畸变
+          下逆算误差会直接冒进位姿(本工程对 cv2 迭代逆的实测教训:r²=1.0 处
+          逆误差已达 8px)。改走「models.unproject 精确牛顿逆 → 取切平面坐标
+          (ray[:2]/ray[2]) → 单位阵 K + 零畸变 solvePnP」——与 Phase 2
+          scoring/此处 frame_pose_ba 的初值路线同源,对三个模型都成立。
+
+    返回 (ok, rvec, tvec);失败(OpenCV 返回 False 或鱼眼射线 z<=0,即射线
+    不落在前半球、切平面坐标不存在)统一 (False, None, None),由调用方决定
+    记失败还是抛出——本函数不替调用方做策略决定。
+    """
+    objp64 = np.asarray(objp, dtype=np.float64)
+    uv64 = np.asarray(uv, dtype=np.float64)
+    objp32 = objp64.astype(np.float32).reshape(-1, 1, 3)
+    if is_fisheye(np.asarray(intr.params, dtype=np.float64).ravel()):
+        rays = models.unproject(uv64.reshape(-1, 2),
+                                np.asarray(intr.params, dtype=np.float64).ravel())
+        z = rays[:, 2]
+        if not bool((z > 0).all()):
+            return False, None, None
+        flat32 = (rays[:, :2] / z[:, None]).astype(np.float32).reshape(-1, 1, 2)
+        ok, rvec, tvec = cv2.solvePnP(
+            objp32, flat32, np.eye(3), np.zeros(5),
+            flags=cv2.SOLVEPNP_ITERATIVE)
+    else:
+        ok, rvec, tvec = cv2.solvePnP(
+            objp32, uv64.astype(np.float32).reshape(-1, 1, 2),
+            np.asarray(intr.K, dtype=np.float64),
+            np.asarray(intr.D, dtype=np.float64).ravel().reshape(-1, 1),
+            flags=cv2.SOLVEPNP_ITERATIVE)
+    if not ok:
+        return False, None, None
+    return (True, np.asarray(rvec, dtype=np.float64).ravel(),
+            np.asarray(tvec, dtype=np.float64).ravel())

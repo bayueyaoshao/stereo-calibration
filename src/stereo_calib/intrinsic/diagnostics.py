@@ -52,6 +52,33 @@ _A3_MIN_SUBSETS = 4
 # A3 的 6 个切片名(按每帧板中心相对画面中心的方位)
 _A3_SPLIT_NAMES = ("左半", "右半", "上半", "下半", "内圈", "外圈")
 
+# 模型名 → OpenCV dist 向量长度(2026-10-26 增补 M4 鱼眼)。
+# 三个长度互不相同,但语义完全不同:4 长是鱼眼 θ 多项式 [k1,k2,k3,k4],
+# 5/8 长是针孔 [k1,k2,p1,p2,k3(,k4,k5,k6)]——因此按长度反推模型是安全的,
+# 而「拿鱼眼 D 去喂针孔 cv2 调用」必须当场拦下(它会被安静地当成
+# [k1,k2,p1,p2],结果看着像正常数、实则错模型)。
+_EXPECTED_D_LEN = {"M2": 5, "M8": 8, "M4": 4}
+# 长度 → 模型:只登记**针孔族**的两条(M2/M8)。4 长一律不许反推——它是鱼眼
+# 族的长度,而同一长度在针孔 cv2 眼里会被当成 [k1,k2,p1,p2];要声明"这是 M4"
+# 必须显式传 model="M4"(旧测试与产线调用形态都不靠猜语义)。
+_D_LEN_TO_MODEL = {n: m for m, n in _EXPECTED_D_LEN.items() if m != "M4"}
+
+# 鱼眼系迭代停止条件:容差压到 1e-12(比 solve.py 的 1e-6 更紧)。
+# 理由:这里的 cv2 调用要的是**精确逆**(PnP 前的去畸变、去畸变直线度),
+# 逆算误差会直接冒成「残差结构」,把 A0/A1 该判的模型误差信号淹没掉。
+_FISHEYE_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 100, 1e-12)
+
+
+def _expected_d_len(model: str) -> int:
+    """模型名 → OpenCV dist 长度;未知模型中文 ValueError(布局必须在入口点名)。"""
+    try:
+        return _EXPECTED_D_LEN[model]
+    except KeyError:
+        raise ValueError(
+            f"畸变模型名不合法:{model!r}(体检只支持 "
+            f"{'/'.join(sorted(_EXPECTED_D_LEN))})。请传入来自配置文件或内参"
+            f"产物的模型名,不要按位置猜布局。") from None
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -86,14 +113,15 @@ def _as_float64(arr, name: str, shape: tuple | None = None) -> np.ndarray:
         raise ValueError(
             f"体检输入 {name} 形状不合:期望 {shape},实际是 {a.shape}。"
             f"请检查调用方传入的数组排布(uv=(帧数,角点数,2)、objp=(角点数,3)、"
-            f"K=3×3、D=5 长 M2 / 8 长 M8 布局)。"
+            f"K=3×3、D=5 长 M2 / 8 长 M8 / 4 长 M4 布局)。"
         )
     return a
 
 
-def _validate_inputs(uv, objp, K, D, image_size) -> tuple[np.ndarray, np.ndarray,
-                                                          np.ndarray, np.ndarray,
-                                                          tuple[int, int]]:
+def _validate_inputs(uv, objp, K, D, image_size, model: str | None = None,
+                     ) -> tuple[np.ndarray, np.ndarray,
+                                np.ndarray, np.ndarray,
+                                tuple[int, int], str]:
     """体检入口的形状/取值防线(与 solve._check_common_inputs 同风格的轻量版)。"""
     uv_arr = _as_float64(uv, "uv")
     if uv_arr.ndim != 3 or uv_arr.shape[2] != 2 or uv_arr.shape[0] < 1:
@@ -111,11 +139,23 @@ def _validate_inputs(uv, objp, K, D, image_size) -> tuple[np.ndarray, np.ndarray
             f"objp {objp_arr.shape[0]} 点。两者必须逐点对齐。")
     K_arr = _as_float64(K, "K", shape=(3, 3))
     D_arr = _as_float64(D, "D")
-    if D_arr.shape not in ((5,), (8,)):
-        # 布局分派:M2 五参 / M8 rational 8(2026-10-24 增补),其余长度一律拒收
+    # model 缺省(None,旧调用形态)时按 D 长度反推,但**只认针孔族**的 5→M2、
+    # 8→M8;4 长(鱼眼族)不许猜,必须显式点名 model="M4"。
+    if model is None:
+        model = _D_LEN_TO_MODEL.get(D_arr.shape[0])
+        if model is None:
+            raise ValueError(
+                f"体检输入 D 形状不合:期望 (5,)(M2 五参)、(8,)(M8 rational 8) "
+                f"或 (4,)(M4 鱼眼),实际是 {D_arr.shape}。请检查调用方传入的"
+                f"畸变布局,或显式传入 model 参数点名布局。")
+    expected = _expected_d_len(model)      # 模型名非法在这里就炸(入口点名)
+    if D_arr.shape != (expected,):
+        # 布局派位按模型:M2 五参 / M8 rational 8 / M4 鱼眼 4。长度与模型对不上
+        # = 调用方把另一族的 D 递了进来(如把 M4 的 4 长喂给针孔路径),必须拦。
         raise ValueError(
-            f"体检输入 D 形状不合:期望 (5,)(M2 五参)或 (8,)(M8 rational 8),"
-            f"实际是 {D_arr.shape}。请检查调用方传入的畸变布局与产线 "
+            f"体检输入 D 形状不合:模型 {model} 期望 ({expected},)("
+            f"{'鱼眼 θ 多项式 [k1,k2,k3,k4]' if model == 'M4' else '针孔 dist 布局'})"
+            f",实际是 {D_arr.shape}。请检查调用方传入的畸变布局与产线 "
             f"distortion_model 配置是否一致。")
     size = tuple(image_size)
     if len(size) != 2 or any(int(v) != v or v <= 0 for v in size):
@@ -127,18 +167,48 @@ def _validate_inputs(uv, objp, K, D, image_size) -> tuple[np.ndarray, np.ndarray
         raise ValueError(
             "体检输入含 NaN/Inf:体检只接受有限数值(train 幸存视图在装载层已做"
             "防线,K/D 来自定稿求解,出现非数值说明上游防线被击穿,请反馈维护者)。")
-    return uv_arr, objp_arr, K_arr, D_arr, (int(size[0]), int(size[1]))
+    return uv_arr, objp_arr, K_arr, D_arr, (int(size[0]), int(size[1])), model
+
+
+def _per_point_residuals_fisheye(uv: np.ndarray, objp: np.ndarray,
+                                 K: np.ndarray, D: np.ndarray) -> np.ndarray:
+    """鱼眼版逐点残差:cv2.fisheye.solvePnP + cv2.fisheye.projectPoints。
+
+    为什么不能用针孔那条路solvePnP(K, D):4 长 D 在针孔 cv2 眼里是
+    [k1,k2,p1,p2],代入后一个数也不报错,只是整个残差场都错模型。这里
+    显式走 fisheye 命名空间;内部去畸变用 _FISHEYE_CRITERIA 收紧到 1e-12,
+    避免逆算误差冒成「残差结构」混淆 A0/A1 的模型误差信号。
+    """
+    objp64 = np.ascontiguousarray(objp, dtype=np.float64).reshape(-1, 1, 3)
+    dist = D.ravel().reshape(-1, 1)
+    residuals: list[np.ndarray] = []
+    for i, pts in enumerate(uv):
+        pts64 = np.ascontiguousarray(pts, dtype=np.float64).reshape(-1, 1, 2)
+        ok, rvec, tvec = cv2.fisheye.solvePnP(
+            objp64, pts64, K, dist, None, None, False, cv2.SOLVEPNP_ITERATIVE,
+            _FISHEYE_CRITERIA)
+        if not ok:
+            raise ValueError(
+                f"体检第 {i} 帧鱼眼 solvePnP 求位姿失败(OpenCV 返回 ok=False):"
+                f"产线 K/D 对该帧角点连位姿都解不稳,内参可靠性无从谈起。"
+                f"请检查该帧角点与标定结果。")
+        proj, _jac = cv2.fisheye.projectPoints(objp64, rvec, tvec, K, dist)
+        residuals.append(pts - np.asarray(proj, dtype=np.float64).reshape(-1, 2))
+    return np.stack(residuals)
 
 
 def _per_point_residuals(uv: np.ndarray, objp: np.ndarray, K: np.ndarray,
-                         D: np.ndarray) -> np.ndarray:
-    """逐点残差(公共前置):每帧 PnP 估位姿 → projectPoints 回代 → uv − 投影。
+                         D: np.ndarray, model: str = "M2") -> np.ndarray:
+    """逐点残差(公共前置):每帧 PnP 估位姿 → 投影回代 → uv − 投影。
 
-    协议(与已验证体检脚本一致):solvePnP 用 SOLVEPNP_ITERATIVE,cv2 绑定
-    边界降 float32 装包,projectPoints 回代 float64;返回 (F,P,2) float64。
-    某帧 PnP 失败属数值路径异常(数据已过装载与求解防线,此处失败说明
-    K/D 病态到 PnP 都不稳),中文 ValueError 上抛由编排层单路收口。
+    协议(与已验证体检脚本一致):PnP 用迭代法,cv2 绑定边界降精度装包/鱼眼
+    侧全 float64,回代 float64;返回 (F,P,2) float64。某帧 PnP 失败属数值
+    路径异常(数据已过装载与求解防线,此处失败说明 K/D 病态到 PnP 都不稳),
+    中文 ValueError 上抛由编排层单路收口。模型分支:M2/M8 走针孔套件,
+    M4 走鱼眼套件(_per_point_residuals_fisheye)。
     """
+    if model == "M4":
+        return _per_point_residuals_fisheye(uv, objp, K, D)
     objp32 = np.ascontiguousarray(objp, dtype=np.float32).reshape(-1, 1, 3)
     dist = D.ravel().reshape(-1, 1)
     residuals: list[np.ndarray] = []
@@ -156,9 +226,37 @@ def _per_point_residuals(uv: np.ndarray, objp: np.ndarray, K: np.ndarray,
     return np.stack(residuals)
 
 
+def _refit_fx_fisheye(uv_sub: np.ndarray, objp: np.ndarray, K: np.ndarray,
+                      D: np.ndarray, image_size: tuple[int, int],
+                      freeze_distortion: bool = False) -> tuple[float, float]:
+    """鱼眼版同协议重标(返回重标后的 fx 与 cv2 整体 RMS)。
+
+    flags = RECOMPUTE_EXTRINSIC | FIX_SKEW | USE_INTRINSIC_GUESS(初值吃产线
+    K/D),冻结时再加 FIX_K1..K4(与 M8 的「冻结全部畸变只放 fx」同款语义);
+    形状 (N,1,x)、dtype float64——鱼眼系的规矩,与针孔族的 float32 不同。
+    """
+    n = uv_sub.shape[0]
+    objs = [np.ascontiguousarray(objp, dtype=np.float64).reshape(-1, 1, 3)
+            for _ in range(n)]
+    imgs = [np.ascontiguousarray(p, dtype=np.float64).reshape(-1, 1, 2)
+            for p in uv_sub]
+    flags = (cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW
+             | cv2.fisheye.CALIB_USE_INTRINSIC_GUESS)
+    if freeze_distortion:
+        flags |= (cv2.fisheye.CALIB_FIX_K1 | cv2.fisheye.CALIB_FIX_K2
+                  | cv2.fisheye.CALIB_FIX_K3 | cv2.fisheye.CALIB_FIX_K4)
+    rms, K_fit, _D_fit, _rv, _tv = cv2.fisheye.calibrate(
+        objs, imgs, tuple(image_size),
+        np.array(K, dtype=np.float64, copy=True),
+        np.array(D, dtype=np.float64).ravel().reshape(-1, 1),
+        flags=flags, criteria=_FISHEYE_CRITERIA)
+    return float(np.asarray(K_fit, dtype=np.float64)[0, 0]), float(rms)
+
+
 def _refit_fx(uv_sub: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
               image_size: tuple[int, int], rational: bool,
-              freeze_distortion: bool = False) -> tuple[float, float]:
+              freeze_distortion: bool = False,
+              model: str = "M2") -> tuple[float, float]:
     """同协议重标一份子集/全量数据,返回 (fx, cv2 整体 RMS)。
 
     flags=CALIB_USE_INTRINSIC_GUESS(初值吃产线 K/D);rational=True 或
@@ -175,7 +273,12 @@ def _refit_fx(uv_sub: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray
     唯一自由的场依赖信号,极差回归「fx 吸收畸变」的本义(真实数据实测:
     全自由 cam2 0.94% → 冻结 0.199%,cam1 0.157%,锚点 fx≈2037 附近全绿;
     M2 协议零改动)。拟合失败以 cv2.error 上抛,由调用方决定记 note 或计数。
+
+    M4(鱼眼):转调 _refit_fx_fisheye(flags/形状/dtype 都是另一套规矩);
+    语义不变——冻结与否仍是「只放 fx 还是全放开」。
     """
+    if model == "M4":
+        return _refit_fx_fisheye(uv_sub, objp, K, D, image_size, freeze_distortion)
     n = uv_sub.shape[0]
     use_rational = bool(rational) or np.asarray(D).size == 8
     flags = cv2.CALIB_USE_INTRINSIC_GUESS | (cv2.CALIB_RATIONAL_MODEL if use_rational else 0)
@@ -238,8 +341,13 @@ def _check_a1(res: np.ndarray, r_norm: np.ndarray, uv: np.ndarray,
                                "bin_edges": list(_A1_BIN_EDGES)})
 
 
-def _check_a2(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray) -> CheckResult:
-    """A2 去畸变直线度(仅报告不判红):去畸变后行/列 SVD 共线最大偏差中位数。"""
+def _check_a2(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
+              model: str = "M2") -> CheckResult:
+    """A2 去畸变直线度(仅报告不判红):去畸变后行/列 SVD 共线最大偏差中位数。
+
+    M4 走 cv2.fisheye.undistortPoints(与针孔同名、不同义):同为「把观测点还原
+    到理想针孔像素平面」,但去畸变的逆是另一条公式。
+    """
     dist = D.ravel().reshape(-1, 1)
     ys = np.unique(objp[:, 1])
     xs = np.unique(objp[:, 0])
@@ -247,9 +355,12 @@ def _check_a2(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray) ->
     groups += [np.where(np.isclose(objp[:, 0], x))[0] for x in xs]
     worst_per_frame: list[float] = []
     for pts in uv:
-        und = cv2.undistortPoints(
-            np.ascontiguousarray(pts, dtype=np.float64).reshape(-1, 1, 2),
-            K, dist, None, K).reshape(-1, 2)
+        pts_c = np.ascontiguousarray(pts, dtype=np.float64).reshape(-1, 1, 2)
+        if model == "M4":
+            und = cv2.fisheye.undistortPoints(
+                pts_c, K, dist, None, K, criteria=_FISHEYE_CRITERIA).reshape(-1, 2)
+        else:
+            und = cv2.undistortPoints(pts_c, K, dist, None, K).reshape(-1, 2)
         devs = []
         for g in groups:
             q = und[g] - und[g].mean(axis=0)
@@ -264,7 +375,8 @@ def _check_a2(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray) ->
 
 
 def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
-              image_size: tuple[int, int], center: np.ndarray, cfg) -> CheckResult:
+              image_size: tuple[int, int], center: np.ndarray, cfg,
+              model: str = "M2") -> CheckResult:
     """A3 切片 fx 稳定性:6 切片各重标 fx,极差 %。红:> a3_max_fx_range_pct。
 
     单切片帧数 < a3_min_frames 跳过;有效切片 < 4 → 「数据不足」不计红
@@ -287,7 +399,9 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
     notes: list[str] = []
     detail: dict = {}
     fxs: list[float] = []
-    freeze_d = np.asarray(D).size == 8  # 冻结协议按产线 D 长度分派一次:8 长 = M8 冻结 D;5 长 = M2 全自由(零改动)
+    # 冻结协议一次派定:M8(D 8 长)冻结 / M4(鱼眼,KB4 同样存在 fx-k 的补偿阱)
+    # 冻结 K1..K4 / M2(5 长)全自由(契约零改动)。
+    freeze_d = model in ("M8", "M4")
     for name in _A3_SPLIT_NAMES:
         m = masks[name]
         n = int(m.sum())
@@ -296,7 +410,7 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
             continue
         try:
             fx, _rms = _refit_fx(uv[m], objp, K, D, image_size, rational=False,
-                                 freeze_distortion=freeze_d)
+                                 freeze_distortion=freeze_d, model=model)
         except cv2.error as e:
             notes.append(f"{name}切片重标失败(OpenCV 报错),跳过:{e}")
             continue
@@ -314,15 +428,35 @@ def _check_a3(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
 
 
 def _check_a4(uv: np.ndarray, objp: np.ndarray, K: np.ndarray, D: np.ndarray,
-              image_size: tuple[int, int], cfg) -> CheckResult:
-    """A4 模型阶次探针:升阶 rational8 全量重标,fx 跳变 %。红:> a4_max_fx_jump_pct。
+              image_size: tuple[int, int], cfg, model: str = "M2") -> CheckResult:
+    """A4 模型阶次探针:全量重标,fx 跳变 %。红:> a4_max_fx_jump_pct。
 
     M2 产线解:升阶探针(rational8 vs 产线五参);M8 产线解(D 8 长):
     同阶独立重标一致性探针(cv2 rational8 vs 产线 scipy M8——fx 跳变仍
-    检验 fx 吸收畸变型欠拟合,不再有更高阶可升)。
+    检验 fx 吸收畸变型欠拟合,不再有更高阶可升);M4 产线解(D 4 长,鱼眼):
+    cv2 没有更高阶的鱼眼模型可供升阶,探针语义退化为「同阶 cv2 鱼眼独立
+    重标一致性」——与 M8 同为「看 cv2 能否从产线解出发独立再现同一个 fx」
+    ( fx 仍有吸收畸变的自由度,跳变仍照舊检验该类欠拟合)。
     探针拟合失败(cv2 异常/非有限解)→ 记 note 不计红(探针故障不许撑红灯)。
     """
     fx_prod = float(K[0, 0])
+    if model == "M4":
+        try:
+            fx_probe, _rms = _refit_fx(uv, objp, K, D, image_size, rational=False,
+                                       freeze_distortion=False, model="M4")
+        except cv2.error as e:
+            return CheckResult("A4", "模型阶次探针", None, float(cfg.a4_max_fx_jump_pct),
+                               False, note=f"同阶鱼眼独立重标探针拟合失败(OpenCV 报错),不计红:{e}")
+        if not np.isfinite(fx_probe) or fx_probe <= 0.0:
+            return CheckResult("A4", "模型阶次探针", None, float(cfg.a4_max_fx_jump_pct),
+                               False, note=f"同阶鱼眼独立重标探针解非有限(fx={fx_probe}),不计红")
+        jump = float(abs(fx_prod - fx_probe) / fx_probe * 100.0)
+        return CheckResult("A4", "模型阶次探针", jump, float(cfg.a4_max_fx_jump_pct),
+                           bool(jump > cfg.a4_max_fx_jump_pct),
+                           note="产线 M4(鱼眼 KB4):探针为同阶 cv2 鱼眼独立重标一致性"
+                                "(鱼眼侧无更高阶可升)",
+                           detail={"fx_production": fx_prod, "fx_re_refit": fx_probe,
+                                   "probe": "same_order_fisheye_kb4"})
     same_order = np.asarray(D).size == 8
     probe_label = "同阶 rational8 独立重标探针" if same_order else "升阶 rational8 探针"
     try:
@@ -361,16 +495,20 @@ def _finalize(checks: tuple[CheckResult, ...], notes: tuple[str, ...],
                              notes=notes + (extra,))
 
 
-def run_battery(uv, objp, K, D, image_size, cfg) -> DiagnosticsReport:
+def run_battery(uv, objp, K, D, image_size, cfg, model: str | None = None,
+                ) -> DiagnosticsReport:
     """体检唯一入口:train 幸存角点 + 产线 K/D → 五检查 + verdict。
 
     参数:
         uv:          (F,P,2) float64,某相机 train 幸存视图角点(像素);
         objp:        (P,3) float64,与角点同序的板系物点;
         K / D:       产线定稿解出的 3×3 内参矩阵与畸变向量(M2 5 长 /
-                     M8 8 长,按长度分派);
+                     M8 8 长 / M4 4 长,长度与模型必须一致);
         image_size:  (宽, 高);
-        cfg:         IntrinsicDiagnosticsConfig(阈值与判定规则全部来自配置)。
+        cfg:         IntrinsicDiagnosticsConfig(阈值与判定规则全部来自配置);
+        model:       产线畸变模型名("M2" | "M8" | "M4"),决定每路调用走针孔
+                     还是鱼眼的 cv2 套件(鱼眼系的形状/dtype/flags 是另一套);
+                     传 None(旧调用形态)时按 D 长度反推,语义仍一一对应。
     返回:
         DiagnosticsReport(检查数值/阈值/red/note/verdict/red_count);
         cfg.enabled=False 时返回「未体检」报告,不做任何计算(跳过路径)。
@@ -379,21 +517,22 @@ def run_battery(uv, objp, K, D, image_size, cfg) -> DiagnosticsReport:
         disabled_note = ("体检开关关闭(intrinsic.diagnostics.enabled: false),"
                          "本轮未体检,内参可靠性未判定")
         return _finalize((), (disabled_note,), cfg.min_red_count, False)
-    uv_arr, objp_arr, K_arr, D_arr, size = _validate_inputs(uv, objp, K, D, image_size)
+    uv_arr, objp_arr, K_arr, D_arr, size, model = _validate_inputs(
+        uv, objp, K, D, image_size, model)
     width, height = size
     center = np.array([width / 2.0, height / 2.0], dtype=np.float64)
     half_diag = float(np.hypot(center[0], center[1]))
 
-    res = _per_point_residuals(uv_arr, objp_arr, K_arr, D_arr)
+    res = _per_point_residuals(uv_arr, objp_arr, K_arr, D_arr, model)
     diff = uv_arr - center
     r_norm = np.linalg.norm(diff, axis=-1) / half_diag     # (F,P)
 
     checks = (
         _check_a0(res, r_norm, cfg),
         _check_a1(res, r_norm, uv_arr, center, cfg),
-        _check_a2(uv_arr, objp_arr, K_arr, D_arr),
-        _check_a3(uv_arr, objp_arr, K_arr, D_arr, size, center, cfg),
-        _check_a4(uv_arr, objp_arr, K_arr, D_arr, size, cfg),
+        _check_a2(uv_arr, objp_arr, K_arr, D_arr, model),
+        _check_a3(uv_arr, objp_arr, K_arr, D_arr, size, center, cfg, model),
+        _check_a4(uv_arr, objp_arr, K_arr, D_arr, size, cfg, model),
     )
     return _finalize(checks, (), cfg.min_red_count, True)
 

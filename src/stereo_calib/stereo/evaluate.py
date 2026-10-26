@@ -41,7 +41,7 @@ from scipy.optimize import least_squares
 from stereo_calib.intrinsic import models
 from stereo_calib.io.config import BoardSpec
 from stereo_calib.preprocess.artifacts import build_object_points
-from stereo_calib.stereo.observation import IntrinsicsView, Pairs
+from stereo_calib.stereo.observation import IntrinsicsView, Pairs, solve_view_pose
 
 # 单帧数值异常收口家族(scoring.py 同款):np.linalg.LinAlgError 是
 # ValueError 子类一并覆盖;AssertionError 覆盖 models.project 的 Z>0 数据
@@ -208,11 +208,9 @@ def disambiguate_frame(uv1: np.ndarray, uv2: np.ndarray, objp: np.ndarray,
     R_rel_arr = np.asarray(R_rel, dtype=np.float64)
     t_rel_arr = np.asarray(t_rel, dtype=np.float64).ravel()
 
-    # 锚 = 当帧 cam1 solvePnP(带畸变原始像素 + 全套 K/D,参考 06 L186-190)
-    ok, rvec1, tvec1 = cv2.solvePnP(
-        objp_arr.astype(np.float32).reshape(-1, 1, 3),
-        uv1_arr.astype(np.float32).reshape(-1, 1, 2),
-        k1, d1.reshape(-1, 1), flags=cv2.SOLVEPNP_ITERATIVE)
+    # 锚 = 当帧 cam1 位姿(参考 06 L186-190)。PnP 一律经 observation.solve_view_pose
+    # (按模型分派的唯一住址):M2/M8 喂带畸变原始像素,M4 走自家精确反投影 + 切平面。
+    ok, rvec1, tvec1 = solve_view_pose(objp_arr, uv1_arr, intr1)
     if not ok:
         raise RuntimeError("消歧锚求解失败:当帧 cam1 PnP 无解,该帧几何可疑")
     R1, _ = cv2.Rodrigues(np.asarray(rvec1, dtype=np.float64).ravel())

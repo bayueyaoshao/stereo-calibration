@@ -469,20 +469,27 @@ def refine_joint(pairs: Pairs, intr1: IntrinsicsView, intr2: IntrinsicsView,
     tr_solver="lsmr"、x_scale="jac"、loss="linear"、容差照 refine_cfg);
     收敛判定经 cost_trace + _is_practically_converged/_tail_improvement,
     判定依据全进 solver_meta 不静默(T-03-06)。
-    畸变模型边界:仅支持 M2;M8(D 8 长/params 12 参)入口 fail-closed
-    拒收——θ 的 D 块按五参定死,12 参会被静默截断,绝不带病截断。"""
+    畸变模型边界:仅支持 M2;M8(D 8 长/params 12 参)与 M4 鱼眼(D 4 长/params
+    8 参)一律入口 fail-closed 拒收——θ 的 D 块按五参定死,其他布局会被静默
+    截断且 conf 不同义,绝不带病截断。"""
     uv1 = np.asarray(pairs.uv1, dtype=np.float64)
     uv2 = np.asarray(pairs.uv2, dtype=np.float64)
     objp = np.asarray(pairs.objp, dtype=np.float64)
     n_pairs, n_points = uv1.shape[0], uv1.shape[1]
-    # 畸变模型边界第一道检查(先于形状防线):M8 fail-closed 拒收
+    # 畸变模型边界第一道检查(先于形状防线):非 M2 一律 fail-closed 拒收。
+    # 两件事都要看:模型名 + **参数布局**(8/9/12 长)。只查名会放过「模型名
+    # 写着 M2、params 却是鱼眼 8 长」的不一致构造,而这种数据在 θ 里同样会
+    # 被当成五参布局静默截断。
     for intr, what in ((intr1, "intr1"), (intr2, "intr2")):
-        if getattr(intr, "model", "M2") != "M2":
+        name = getattr(intr, "model", "M2")
+        layout = models.model_of_params(np.asarray(intr.params, dtype=np.float64).ravel())
+        if name != "M2" or layout != "M2":
             raise ValueError(
-                f"联合 BA 不支持畸变模型 {getattr(intr, 'model', 'M2')}({what}.model):"
-                f"θ 的 D 块布局按 M2 五参定死,12 参 M8 会被静默截断(fail-closed "
-                f"拦截)。联合 BA 的 M8 接线尚未落地;joint.enabled 默认 false,"
-                f"请检查 stereo.joint.enabled 与产线 distortion_model 配置。")
+                f"联合 BA 不支持畸变模型 {name}({what}.model,{what}.params 是 "
+                f"{layout} 布局):θ 的 D 块布局按 M2 五参定死,M8(12 参)与 M4 "
+                f"鱼眼(8 参)都会被静默截断(fail-closed 拦截)。联合 BA 的 "
+                f"M8/M4 接线尚未落地;joint.enabled 默认 false,请检查 "
+                f"stereo.joint.enabled 与产线 distortion_model 配置。")
     if (init.rvecs1.shape != (n_pairs, 3) or init.tvecs1.shape != (n_pairs, 3)
             or not all(init.per_pair_ok)):
         raise ValueError(

@@ -1,13 +1,28 @@
-"""M2/M8 相机模型(针孔 + Brown-Conrady 五系数 / rational 八系数畸变)——内参链路的唯一数学源。
+"""M2/M8/M4 相机模型——内参链路的唯一数学源。
+
+    M2 = 针孔 + Brown-Conrady 五系数畸变(9 参)
+    M8 = 针孔 + rational 八系数畸变(12 参)
+    M4 = 鱼眼等距 KB4(8 参,2026-10-26 增补)
 
 移植裁剪声明(体例照 corners/canonical.py):移植自参考工程
 calib.models/pinhole_brown.py 与 calib.models/base.py(只读引用,绝不修改)。
-参考工程是多模型族 + 注册机制;本工程不做注册表——M2(9 参:fx,fy,cx,cy,
+参考工程是多模型族 + 查表机制;本工程不做查表——M2(9 参:fx,fy,cx,cy,
 k1,k2,p1,p2,k3)与 M8(12 参:上 9 参 + k4,k5,k6 rational 分母项)双模型
 最小支持,公式体只有一份:M2 是 M8 的「den≡1 特例」,径向公式在全部代码
 里只有一处。2026-10-24 用户指令 supersession:此前「扩展模型时按参考工程
 方式扩回」的裁剪声明由「按本文件的最小双模型方式扩展」取代(根因:M2 对
-本相机 8mm C-mount 4MP 欠拟合,rational8 是唯一堵点);注册机制依旧不移植。
+本相机 8mm C-mount 4MP 欠拟合,rational8 是唯一堵点);查表机制依旧不移植。
+
+M4 是同一套最小主义下的第二次扩展(2026-10-26,移植自只读参考工程
+calib/models/kb4.py,公式体与参数顺序照搬,不 import 该包):它跟针孔族不
+是「换一套畸变」的关系,而是另一条成像法则。白话:针孔族先取归一化坐标
+X/Z、Y/Z 再把它弄弯,必须假定所有点都在镜头前方(Z>0);鱼眼族先取入射角
+θ = arctan2(r, z),用四系数多项式把它弯成「畸变角」θd,像素半径 = 焦距 ×
+θd,方向保持不变——θ 对任意 z 符号都有定义,所以视场超过 90° 甚至 180° 也
+能建模;代价是「Z 必须为正」那条数据防线在 M4 下不成立(按模型分支,针孔
+族照旧保留)。布局:前四位仍是 fx,fy,cx,cy,畸变四位是 k1..k4;参数向量 8
+长,D 长 4 且顺序就是 [k1,k2,k3,k4](注意与针孔族 D 的 [k1,k2,p1,p2,k3]
+语义完全不同——读参必须按布局名,严禁按位置猜)。
 
 白话口径:三维点先除以深度(Z)得归一化坐标,经径向/有理畸变弄弯,再乘
 焦距加主点落到像素。M2 径向缩放 rad = 1+k1·r²+k2·r⁴+k3·r⁶;M8 为
@@ -35,28 +50,65 @@ import numpy as np
 INTRINSIC_NAMES_M2: tuple[str, ...] = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3")
 INTRINSIC_NAMES_M8: tuple[str, ...] = (
     "fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6")
+# M4(鱼眼等距 KB4,2026-10-26 增补):8 参、无 skew、无切向项。
+# 与针孔族的 D 同位置不同义:这里 D = params[4:] = [k1,k2,k3,k4](θ 多项式),
+# 针孔族 D 的前两位与第五位是 [k1,k2,p1,p2,k3] —— 按位置猜必错。
+INTRINSIC_NAMES_M4: tuple[str, ...] = ("fx", "fy", "cx", "cy", "k1", "k2", "k3", "k4")
 INTRINSIC_NAMES: tuple[str, ...] = INTRINSIC_NAMES_M2
 
-_NAMES_BY_MODEL = {"M2": INTRINSIC_NAMES_M2, "M8": INTRINSIC_NAMES_M8}
+_NAMES_BY_MODEL = {"M2": INTRINSIC_NAMES_M2, "M8": INTRINSIC_NAMES_M8,
+                   "M4": INTRINSIC_NAMES_M4}
 _NAMES_BY_LEN = {len(v): v for v in _NAMES_BY_MODEL.values()}
+# 长度 → 模型名。三个布局长度互不相同(8/9/12),反查无二义;这条映射是
+# 长度分派(T-02 引入)与模型语义之间的唯一桥。
+_MODEL_BY_LEN = {len(v): k for k, v in _NAMES_BY_MODEL.items()}
 
 # rational 分母的近零防线:工作域 |den−1| 最大约 0.5,远离 0;低于它即病态
 _DEN_MIN = 1.0e-6
+
+# KB4 近轴保护线:归一化半径 r 小于它时 θd/r 的 0/0 用解析极限 1/z 顶上
+# (θ≈r/z,故 x·θd/r → x/z;极限值推导得出,不猜)。
+_NEAR_AXIS_EPS = 1.0e-12
 
 
 def intrinsic_names(model: str) -> tuple[str, ...]:
     """模型名 → 参数布局名元组(全工程唯一的按名取布局出口)。
 
     "M2" → 九名(fx…k3,D 长 5);"M8" → 十二名(fx…k6,D 长 8,k4,k5,k6
-    是 rational 分母的 r²,r⁴,r⁶ 项)。其余值中文 ValueError——模型名只
-    出自 config.yaml 与 intrinsics.json,拼错必须在入口拦下。
+    是 rational 分母的 r²,r⁴,r⁶ 项);"M4" → 八名(fx…k4,D 长 4,k1..k4
+    是鱼眼 θ 多项式系数,与针孔族的 p1/p2/k3 不同义)。其余值中文
+    ValueError——模型名只出自 config.yaml 与 intrinsics.json,拼错必须在
+    入口拦下。
     """
     if model in _NAMES_BY_MODEL:
         return _NAMES_BY_MODEL[model]
     raise ValueError(
         f"畸变模型名不合法:{model!r}。只支持 'M2'(五参 Brown-Conrady,"
-        f"D 长 5)或 'M8'(rational 8,D 长 8)。"
+        f"D 长 5)、'M8'(rational 8,D 长 8)或 'M4'(鱼眼 KB4,D 长 4)。"
         f"请检查 config.yaml 的 intrinsic.distortion_model 或内参产物。")
+
+
+def model_of_params(params: np.ndarray) -> str:
+    """参数向量 → 布局名("M2" 9 长 / "M4" 8 长 / "M8" 12 长)。
+
+    白话:内链路多处只拿到参数向量(没拿到模型名),需要知道自己在处理
+    哪个模型——尤其用它,focal 与畸变布局差得离谱的两个模型族必须区分。
+    长度与布局一一对应(8/9/12),反查无二义;长度不属于任何布局时由
+    _as_params 抛中文 AssertionError(此处进门先过这道防线)。
+    """
+    p = _as_params(params)
+    return _MODEL_BY_LEN[p.shape[0]]
+
+
+def is_fisheye(params: np.ndarray) -> bool:
+    """参数向量是不是鱼眼族布局(当前即 M4)。
+
+    存在理由:模型间唯一的结构性差别是「要不要 Z>0 那条数据防线」——
+    针孔族除以 Z 必须先确认点在镜头前方,鱼眼族按入射角建模则天生允许
+    大视场。下游(project 的防线、位姿初值的射线口径)一律问本函数,
+    不许各自按长度或模型名硬写。
+    """
+    return model_of_params(params) == "M4"
 
 
 def _as_points3d(pts: np.ndarray, what: str = "pts_cam") -> np.ndarray:
@@ -71,13 +123,14 @@ def _as_points3d(pts: np.ndarray, what: str = "pts_cam") -> np.ndarray:
 
 
 def _as_params(params: np.ndarray) -> np.ndarray:
-    """校验参数向量并统一为 float64;布局按长度分派(9 → M2、12 → M8)。"""
+    """校验参数向量并统一为 float64;布局按长度分派(8 → M4、9 → M2、12 → M8)。"""
     p = np.asarray(params, dtype=np.float64).ravel()
     names = _NAMES_BY_LEN.get(p.shape[0])
     if names is None:
         raise AssertionError(
-            f"参数向量形状不合:期望 (9,)(布局 {INTRINSIC_NAMES_M2})或 (12,)"
-            f"(布局 {INTRINSIC_NAMES_M8}),实际拍平后是 {p.shape}。"
+            f"参数向量形状不合:期望 (8,)(布局 {INTRINSIC_NAMES_M4})、(9,)"
+            f"(布局 {INTRINSIC_NAMES_M2})或 (12,)(布局 {INTRINSIC_NAMES_M8}),"
+            f"实际拍平后是 {p.shape}。"
             f"请按 intrinsic_names(模型名) 给出的顺序传参,不要按位置猜。"
         )
     return p
@@ -162,6 +215,153 @@ def _distort(x: np.ndarray, y: np.ndarray, dist: np.ndarray) -> tuple[np.ndarray
     return xd, yd
 
 
+# ---------------------------------------------------------------------------
+# M4(鱼眼等距 KB4)数学核:正投影 / 反投影 / 两份雅可比的唯一算式住址
+# ---------------------------------------------------------------------------
+
+def _fisheye_radial(x: np.ndarray, y: np.ndarray, z: np.ndarray,
+                    dist: np.ndarray) -> tuple[np.ndarray, np.ndarray,
+                                               np.ndarray, np.ndarray]:
+    """KB4 的公共径向件:返回 (r, θ, θd, dθd/dθ)——四个投影相关函数的唯一算式源。
+
+    θ = arctan2(r, z) 是相对光轴的入射角(任意 z 符号都有定义,超过 90°
+    视场也成立:z<0 时 θ>π/2);θd = θ·(1+k1θ²+k2θ⁴+k3θ⁶+k4θ⁸) 是把入射角
+    弯到像面的「畸变角」;dθd/dθ = 1+3k1θ²+5k2θ⁴+7k3θ⁶+9k4θ⁸(积的求导法则)
+    与 unproject 牛顿迭代的 f'(θ) 同式——正逆解共用一份导数,不会两套公式
+    走偏。dist 布局 = params[4:] = [k1,k2,k3,k4](M4 专用,与针孔族不同义)。
+    """
+    r = np.hypot(x, y)
+    theta = np.arctan2(r, z)
+    t2 = theta * theta
+    poly = 1.0 + dist[0] * t2 + dist[1] * t2**2 + dist[2] * t2**3 + dist[3] * t2**4
+    dpoly = 1.0 + 3.0 * dist[0] * t2 + 5.0 * dist[1] * t2**2 \
+        + 7.0 * dist[2] * t2**3 + 9.0 * dist[3] * t2**4
+    return r, theta, theta * poly, dpoly
+
+
+def _fisheye_scale(x: np.ndarray, y: np.ndarray, z: np.ndarray,
+                   dist: np.ndarray) -> np.ndarray:
+    """KB4 径向缩放 s = θd / r(像素 = 焦距 × 方向坐标 × s + 主点)。
+
+    近轴保护:r→0 时 θd/r 是 0/0,解析极限为 1/z(θ≈r/z)——np.divide 的
+    where 只在安全处做除法,绝不做「先全除再挑」(那样会先产出 NaN 再传染
+    给雅可比与优化器)。
+    """
+    _r, _theta, theta_d, _dpoly = _fisheye_radial(x, y, z, dist)
+    r = np.hypot(x, y)
+    return np.divide(theta_d, r, out=1.0 / z, where=r >= _NEAR_AXIS_EPS)
+
+
+def _project_fisheye(pts: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """M4 投影:(N,3) 相机坐标系点 + (8,) 参数 → (N,2) 像素,float64。
+
+    与针孔族的唯一 API 差别:不断言 Z>0——θ = arctan2(r,z) 对任意 z 符号
+    都有定义,超过 90° 视场的点(-Z <= 0)在鱼眼模型下完全可以合法成像。
+    """
+    fx, fy, cx, cy = p[:4]
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    scale = _fisheye_scale(x, y, z, p[4:])
+    return np.stack([fx * x * scale + cx, fy * y * scale + cy], axis=1)
+
+
+def _project_fisheye_jacobian(pts: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """M4 投影对内参的解析雅可比:(N,3)+(8,) → (N,2,8),float64。
+
+    像素 = 焦距 ×(方向坐标)× θd/r + 主点;链式后:
+      ∂u/∂fx = x·θd/r(近轴解析极限 → x/z),∂u/∂cx = 1;
+      ∂θd/∂kj = θ^(2j+3)(j 从 0 数:k1 配 θ³、k4 配 θ⁹),故
+      ∂u/∂kj = fx·x·θ^(2j+3)/r(近轴极限为 0:θ 的奇次幂趋零远快于 x/r
+      的有界性)。8 列全部有意义、无一恒零(scipy 雅可比 8 列都要对得上)。
+    """
+    fx, fy = p[0], p[1]
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    n = pts.shape[0]
+    r, theta, theta_d, _dpoly = _fisheye_radial(x, y, z, p[4:])
+    safe = r >= _NEAR_AXIS_EPS
+    su = np.divide(x * theta_d, r, out=x / z, where=safe)   # ∂u/∂fx 原料(近轴 → x/z)
+    sv = np.divide(y * theta_d, r, out=y / z, where=safe)
+
+    jac = np.zeros((n, 2, len(INTRINSIC_NAMES_M4)), dtype=np.float64)
+    jac[:, 0, 0] = su
+    jac[:, 1, 1] = sv
+    jac[:, 0, 2] = 1.0
+    jac[:, 1, 3] = 1.0
+    for j in range(4):
+        theta_odd = theta ** (2 * j + 3)
+        jac[:, 0, 4 + j] = np.divide(fx * x * theta_odd, r,
+                                     out=np.zeros(n), where=safe)
+        jac[:, 1, 4 + j] = np.divide(fy * y * theta_odd, r,
+                                     out=np.zeros(n), where=safe)
+    return jac
+
+
+def _project_fisheye_point_jacobian(pts: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """M4 投影对相机坐标系点的解析雅可比:(N,3)+(8,) → (N,2,3),float64。
+
+    u = fx·x·s + cx(v 同理),s = θd/r;对 q∈{x,y,z} 逐个链式并整理:
+      ∂s/∂x = x·B/r²,B = (dθd/dθ)·z/(r²+z²) − s;∂s/∂z = −(dθd/dθ)/(r²+z²)
+      (∂θ/∂x = z·x/((r²+z²)·r) 代入后 r 恰好约掉,∂s/∂z 全平面无奇点)。
+    近轴(r<1e-12)解析极限:∂s/∂x=∂s/∂y=0、∂s/∂z=−1/z²,与 pinhole 的 ∂u/∂X
+    = fx/z 口径一致——两个模型族的雅可比在这个极限上应当收敛到同一张泰勒式。
+    """
+    fx, fy = p[0], p[1]
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    n = pts.shape[0]
+    r, _theta, theta_d, dthd_dtheta = _fisheye_radial(x, y, z, p[4:])
+    safe = r >= _NEAR_AXIS_EPS
+    r2 = r * r
+    denom = r2 + z * z
+    s = np.divide(theta_d, r, out=1.0 / z, where=safe)
+    bracket = dthd_dtheta * z / denom - s
+    ds_dx = np.divide(x * bracket, r2, out=np.zeros(n), where=safe)
+    ds_dy = np.divide(y * bracket, r2, out=np.zeros(n), where=safe)
+    ds_dz = -dthd_dtheta / denom                       # r 已约掉,无奇点
+
+    jac = np.empty((n, 2, 3), dtype=np.float64)
+    jac[:, 0, 0] = fx * (s + x * ds_dx)
+    jac[:, 0, 1] = fx * x * ds_dy
+    jac[:, 0, 2] = fx * x * ds_dz
+    jac[:, 1, 0] = fy * y * ds_dx
+    jac[:, 1, 1] = fy * (s + y * ds_dy)
+    jac[:, 1, 2] = fy * y * ds_dz
+    return jac
+
+
+def _unproject_fisheye(uv_arr: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """M4 反投影:像素 → 单位射线方向 (N,3),真逆解(θ 反解牛顿迭代)。
+
+    做法(与 pinhole 同模:都住本文件,不多一份公式):像素减主点除焦距得
+    畸变角向量,θd = hypot(xd,yd);方位角 φ = arctan2(yd,xd) 畸变前后不
+    变(鱼眼只改半径不改方向);对 θd = θ·(1+k1θ²+…+k4θ⁸) 用牛顿迭代反解
+    θ(初值取 θd,畸变小则几乎一步收敛,上限 50 步);射线方向 =
+    (sinθ·cosφ, sinθ·sinφ, cosθ)。往返偏差 < 1e-9 像素(测试锁定)。
+
+    注意返回口径与 pinhole 不同:这里是**单位向量**(z 分量 = cosθ),不再
+    保证 z≡1;消费方要取「切平面坐标」时统一写 ray[:2]/ray[2:3](照 pixel
+    口径回乘 K 即 ideal-pinhole 像素,DLT 链路就是这么用的)。
+    """
+    fx, fy, cx, cy = p[:4]
+    k = p[4:]
+    xd = (uv_arr[:, 0] - cx) / fx
+    yd = (uv_arr[:, 1] - cy) / fy
+    theta_d = np.hypot(xd, yd)
+    phi = np.arctan2(yd, xd)
+
+    theta = theta_d.copy()
+    for _ in range(50):
+        t2 = theta * theta
+        poly = 1.0 + k[0] * t2 + k[1] * t2**2 + k[2] * t2**3 + k[3] * t2**4
+        f_prime = (1.0 + 3.0 * k[0] * t2 + 5.0 * k[1] * t2**2
+                   + 7.0 * k[2] * t2**3 + 9.0 * k[3] * t2**4)
+        step = (theta * poly - theta_d) / f_prime
+        theta = theta - step
+        if float(np.abs(step).max(initial=0.0)) < 1e-15:
+            break
+
+    sin_t = np.sin(theta)
+    return np.stack([sin_t * np.cos(phi), sin_t * np.sin(phi), np.cos(theta)], axis=1)
+
+
 def transform_to_camera(objp: np.ndarray,
                         rvec: np.ndarray,
                         tvec: np.ndarray,
@@ -205,13 +405,19 @@ def transform_to_camera(objp: np.ndarray,
 
 
 def project(pts_cam: np.ndarray, params: np.ndarray) -> np.ndarray:
-    """投影:(N,3) 相机坐标系点 + (9,)/(12,) 参数 → (N,2) 像素,float64。
+    """投影:(N,3) 相机坐标系点 + (8,)/(9,)/(12,) 参数 → (N,2) 像素,float64。
 
-    Z 轴朝前:先断言 Z 全 > 0(针孔要除以 Z),再除 Z → 畸变 → 乘焦距加主点。
-    参数向量按长度分派 M2(9)/M8(12);畸变核只此一份(_distort)。
+    参数向量按长度分派:M4(8,鱼眼 KB4)/ M2(9)/ M8(12);畸变核只此一份
+    (_distort 针孔、_fisheye_* 鱼眼)。
+
+    Z 轴朝前:针孔族要除以 Z,先断言 Z 全 > 0;**鱼眼族不做这条断言**——
+    θ = arctan2(r,z) 对任意 z 符号有定义,超过 90° 视场的点(z<=0)在 KB4
+    下仍是个合法的像点,按针孔的规矩把它拦下来反而会误杀大视场数据。
     """
     pts = _as_points3d(pts_cam)
     p = _as_params(params)
+    if is_fisheye(p):
+        return _project_fisheye(pts, p)
     if not np.all(pts[:, 2] > 0.0):
         raise AssertionError(
             "project 收到 Z<=0 的点:针孔投影要除以 Z,Z 必须全为正"
@@ -225,14 +431,17 @@ def project(pts_cam: np.ndarray, params: np.ndarray) -> np.ndarray:
 
 
 def project_jacobian(pts_cam: np.ndarray, params: np.ndarray) -> np.ndarray:
-    """投影对内参的解析雅可比:(N,3)+(9,)/(12,) → (N,2,9)/(N,2,12),float64。
+    """投影对内参的解析雅可比:(N,3)+(8,)/(9,)/(12,) → (N,2,8)/(N,2,9)/(N,2,12)。
 
-    只含内参列;对位姿的链式块(d像素/d相机点 × ∂Xc/∂外参)由
-    project_point_jacobian 与 transform_to_camera 组装。解析式对
-    scipy 数值差分基准逐列校验 < 1e-6(测试锁定,M8 含 k4,k5,k6 列)。
+    只含内参列(列数 = 该布局的参数个数);对位姿的链式块(d像素/d相机点 ×
+    ∂Xc/∂外参)由 project_point_jacobian 与 transform_to_camera 组装。解析式
+    对 scipy 数值差分基准逐列校验 < 1e-6(测试锁定:M8 含 k4,k5,k6 列,M4
+    含 k1..k4 四列)。
     """
     pts = _as_points3d(pts_cam)
     p = _as_params(params)
+    if is_fisheye(p):
+        return _project_fisheye_jacobian(pts, p)
     fx, fy = p[0], p[1]
     z = pts[:, 2]
     x = pts[:, 0] / z
@@ -265,14 +474,18 @@ def project_jacobian(pts_cam: np.ndarray, params: np.ndarray) -> np.ndarray:
 
 
 def project_point_jacobian(pts_cam: np.ndarray, params: np.ndarray) -> np.ndarray:
-    """投影对相机坐标系点的解析雅可比:(N,3)+(9,)/(12,) → (N,2,3),float64。
+    """投影对相机坐标系点的解析雅可比:(N,3)+(8,)/(9,)/(12,) → (N,2,3),float64。
 
-    链式 = 畸变核对归一化坐标的 2×2 导数(与 unproject 牛顿迭代里的那份
-    2×2 公式逐字相同——同一份公式两处用,保证正逆解导数一致)乘上归一化
-    坐标对相机点的导数(∂x/∂X=1/z、∂x/∂Z=−x/z 这组除法链)。
+    针孔族链式 = 畸变核对归一化坐标的 2×2 导数(与 unproject 牛顿迭代里的
+    那份 2×2 公式逐字相同——同一份公式两处用,保证正逆解导数一致)乘上归一
+    化坐标对相机点的导数(∂x/∂X=1/z、∂x/∂Z=−x/z 这组除法链);因此针孔族
+    保留 Z>0 断言。鱼眼族走 _project_fisheye_point_jacobian(θ 链路,不断言
+    Z>0)。
     """
     pts = _as_points3d(pts_cam)
     p = _as_params(params)
+    if is_fisheye(p):
+        return _project_fisheye_point_jacobian(pts, p)
     fx, fy = p[0], p[1]
     z = pts[:, 2]
     if not np.all(z > 0.0):
@@ -310,6 +523,8 @@ def unproject(uv: np.ndarray, params: np.ndarray) -> np.ndarray:
     "xd = x·ratio(r2)+切向、yd = y·ratio(r2)+切向"(畸变核正向公式)反求
     无畸变坐标 (x,y)——牛顿迭代:初值取 (xd,yd)(畸变小则几乎一步收敛),
     每步解 2×2 线性方程修正,迭代到修正量 < 1e-15(最多 50 步)。
+    (只在针孔族生效;M4 鱼眼走另一段公式 _unproject_fisheye:对 θ 做牛顿
+    迭代解 θd = θ·poly(θ),那里返回的是单位方向向量而非 z≡1 的射线。)
     返回 (x,y,1)/‖(x,y,1)‖ 单位射线;project 对射线缩放不敏感,
     往返契约 project → unproject → project 误差 < 1e-9 像素(测试锁定,
     M2/M8 双模型同阈值)。它是 test 帧评分正确性的关键(反投影天然完成
@@ -323,6 +538,8 @@ def unproject(uv: np.ndarray, params: np.ndarray) -> np.ndarray:
             f"请检查调用方传的是不是逐点 (u,v)。"
         )
     p = _as_params(params)
+    if is_fisheye(p):   # M4 走 θ 反解(见 _unproject_fisheye),不落针孔公式
+        return _unproject_fisheye(uv_arr, p)
     fx, fy, cx, cy = p[:4]
     dist = p[4:]
     xd = (uv_arr[:, 0] - cx) / fx
