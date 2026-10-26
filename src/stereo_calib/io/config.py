@@ -246,6 +246,25 @@ class StereoConfig:
 
 
 @dataclass(frozen=True)
+class ValidationConfig:
+    """模块4 测量精度验证段:消费冻结标定产物对 data/val 做漂移体检。
+
+    data_dir 是验证图像对根目录(<组目录>/cam1.jpg + cam2.jpg);两个阈值是
+    冻结模式对角距离偏差的判定红线(distance_bias_max_mm 管 |平均偏差|,
+    distance_rms_max_mm 管 RMS;现役系统 test 距离 RMS 0.20mm,1mm 红线约
+    5× 噪声底,超线即「参数已漂」的强信号);region_grid 是按板中心在
+    cam1 视场的区域分桶(行,列),[0, 0] 关闭区域分析;min_pairs 是有效
+    验证对数下限,低于此数中文报错不硬算(fail-closed)。
+    """
+
+    data_dir: str = "data/val"
+    distance_bias_max_mm: float = 1.0
+    distance_rms_max_mm: float = 2.0
+    region_grid: tuple[int, int] = (3, 3)
+    min_pairs: int = 1
+
+
+@dataclass(frozen=True)
 class StereoCalibConfig:
     """config.yaml 解析结果:全流程参数的唯一载体(D-10 单一文件分段)。"""
 
@@ -256,6 +275,7 @@ class StereoCalibConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     intrinsic: IntrinsicConfig = field(default_factory=IntrinsicConfig)
     stereo: StereoConfig = field(default_factory=StereoConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
 
 
 def _fail(field_name: str, actual, requirement: str) -> None:
@@ -736,6 +756,53 @@ def _parse_stereo(raw: dict) -> StereoConfig:
                         joint=_parse_stereo_joint(section))
 
 
+def _parse_validation(raw: dict) -> ValidationConfig:
+    """解析 validation 段(模块4 测量精度验证:路径/红线阈值/区域网格/对数下限)。"""
+    cfg = ValidationConfig()
+    section = _check_is_dict(raw.get("validation", {}), "validation")
+
+    data_dir = section.get("data_dir", cfg.data_dir)
+    if not isinstance(data_dir, str) or not data_dir:
+        _fail("validation.data_dir", data_dir,
+              "必须是验证图像对根目录的非空路径文字(相对当前工作目录,"
+              "期望结构:<组目录>/cam1.jpg + cam2.jpg)")
+
+    bias_max = section.get("distance_bias_max_mm", cfg.distance_bias_max_mm)
+    if (not isinstance(bias_max, int | float) or isinstance(bias_max, bool)
+            or bias_max <= 0):
+        _fail("validation.distance_bias_max_mm", bias_max,
+              "必须是 > 0 的数(|平均偏差| 红线,毫米;漂移判据,≤0 无判别力)")
+
+    rms_max = section.get("distance_rms_max_mm", cfg.distance_rms_max_mm)
+    if (not isinstance(rms_max, int | float) or isinstance(rms_max, bool)
+            or rms_max <= 0):
+        _fail("validation.distance_rms_max_mm", rms_max,
+              "必须是 > 0 的数(冻结模式偏差 RMS 红线,毫米)")
+
+    grid = section.get("region_grid", cfg.region_grid)
+    if (not isinstance(grid, (list, tuple)) or len(grid) != 2
+            or any(not isinstance(x, int) or isinstance(x, bool) for x in grid)):
+        _fail("validation.region_grid", grid,
+              "必须是一列恰好两个整数的 (行, 列)(如 [3, 3];[0, 0] = 关闭区域分析)")
+    if grid[0] < 0 or grid[1] < 0:
+        _fail("validation.region_grid", grid,
+              "行/列桶数必须 >= 0(负数没有几何意义)")
+    if (grid[0] == 0) != (grid[1] == 0):
+        _fail("validation.region_grid", grid,
+              "非法组合:要么行/列都 > 0(开区域分析),要么都 = 0(关闭);"
+              "只关一个方向会让分桶网格退化成条带")
+
+    min_pairs = section.get("min_pairs", cfg.min_pairs)
+    if not isinstance(min_pairs, int) or isinstance(min_pairs, bool) or min_pairs < 1:
+        _fail("validation.min_pairs", min_pairs,
+              "必须是 >= 1 的整数(有效验证对数下限;0 对等于没验证)")
+
+    return ValidationConfig(data_dir=data_dir, distance_bias_max_mm=float(bias_max),
+                            distance_rms_max_mm=float(rms_max),
+                            region_grid=(int(grid[0]), int(grid[1])),
+                            min_pairs=min_pairs)
+
+
 def _check_output_data_disjoint(cfg: StereoCalibConfig) -> None:
     """跨字段数据安全校验(CLAUDE.md data 只读 + INFRA-03 前置防线)。
 
@@ -762,6 +829,35 @@ def _check_output_data_disjoint(cfg: StereoCalibConfig) -> None:
         )
 
 
+def _check_validation_data_safety(cfg: StereoCalibConfig) -> None:
+    """跨字段数据安全校验(validation 侧,照 _check_output_data_disjoint 体例)。
+
+    validation.data_dir 与 data.train / data.test / output_root 相等或互相
+    包含的配置当场拒绝:验证目录混进 train/test 会让「漂移体检」测到训练
+    考卷自己(结论失真);落进 output_root 之内则运行前清理产物目录会把
+    验证数据一起删掉。resolve() 用默认非 strict 模式——目录不存在也能解析
+    出规范路径,加载层就要拦得住。
+    """
+    val = Path(cfg.validation.data_dir).resolve()
+    for name, other in (("data.train", cfg.data.train), ("data.test", cfg.data.test),
+                        ("output_root", cfg.output_root)):
+        other_dir = Path(other).resolve()
+        if val == other_dir:
+            relation = "两目录指向同一位置"
+        elif other_dir in val.parents:
+            relation = f"{name} 是验证目录的父目录(验证数据位于 {name} 之内)"
+        elif val in other_dir.parents:
+            relation = f"验证目录是 {name} 的父目录({name} 位于验证目录之内)"
+        else:
+            continue
+        raise ValueError(
+            f"配置字段 validation.data_dir/{name} 不合法:验证数据目录与 "
+            f"{name} 不得相等或互相包含(验证数据混入数据/产物目录会让体检结论失真,"
+            f"或被运行前清理一并删除);本次重叠形态:{relation};"
+            f"实际:validation.data_dir={val},{name}={other_dir}。请检查对应的 yaml 文件。"
+        )
+
+
 def load_config(path: Path | str) -> StereoCalibConfig:
     """解析并校验单一 config.yaml,返回不可变的 StereoCalibConfig(D-10)。
 
@@ -785,9 +881,11 @@ def load_config(path: Path | str) -> StereoCalibConfig:
     preprocess = _parse_preprocess(raw)
     intrinsic = _parse_intrinsic(raw)
     stereo = _parse_stereo(raw)
+    validation = _parse_validation(raw)
 
     cfg = StereoCalibConfig(board=board, data=data, output_root=output_root,
                             cv2_threads=cv2_threads, preprocess=preprocess,
-                            intrinsic=intrinsic, stereo=stereo)
+                            intrinsic=intrinsic, stereo=stereo, validation=validation)
     _check_output_data_disjoint(cfg)
+    _check_validation_data_safety(cfg)
     return cfg

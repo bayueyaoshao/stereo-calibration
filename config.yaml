@@ -147,3 +147,12 @@ stereo:
                                        # full_prior(全内参放开 + 先验);约束越强越防内参无界漂移
     prior_weight: 1.0                  # Tikhonov 先验行统一乘子(f/c 相对偏差 + D 绝对偏差拉回)
     spread_ratio_max: 5.0              # 联合解散布防线:精化后逐对 RMS max/median 超此值 → 中文报错(fail-closed)
+
+# ---- 模块4:测量精度验证(消费冻结标定产物,绝不重拟合;评估系统漂移)----
+validation:
+  data_dir: "data/val"                 # 验证图像对根目录(<组目录>/cam1.jpg + cam2.jpg);
+                                       # 与 data.train/test/output_root 相等或互相包含的配置在加载层被拒
+  distance_bias_max_mm: 1.0            # |平均偏差| 红线(漂移判据;现役 test 距离 RMS 0.20mm 的 ~5×)
+  distance_rms_max_mm: 2.0             # 冻结模式偏差 RMS 红线;任一超线 → verdict FAIL、退出码 1
+  region_grid: [3, 3]                  # 按板中心在 cam1 视场的区域分桶(行,列);[0, 0] 关闭区域分析
+  min_pairs: 1                         # 有效验证对数下限(低于此数中文报错不硬算)

@@ -1,4 +1,4 @@
-"""stereo-calib 命令行入口:三个子命令对应三个独立模块(D-09/D-10)。
+"""stereo-calib 命令行入口:四个子命令对应四个独立模块(D-09/D-10)。
 
 体例移植自参考工程 calib.cli.main(只读引用,绝不修改):typer app +
 callback 统一准备、命令入口把坏输入收口为中文一句 + 退出码 1(不吐堆栈)。
@@ -20,7 +20,8 @@ from stereo_calib.io.config import load_config
 app = typer.Typer(
     name="stereo-calib",
     help="双目相机标定生产工具:preprocess 数据预处理 / intrinsic 单相机内参标定 / "
-         "stereo 双目外参标定。三个模块相互独立,可单独运行调试。",
+         "stereo 双目外参标定 / validate 测量精度验证(漂移体检)。"
+         "四个模块相互独立,可单独运行调试。",
     no_args_is_help=True,
 )
 
@@ -109,6 +110,35 @@ def stereo() -> None:
         typer.echo("  请检查 config.yaml 配置与 Phase 1/2 产物(output/ 下的对清单/角点 npz "
                    "与 intrinsics.json),修正后重跑 stereo-calib stereo。")
         raise typer.Exit(code=1) from e
+
+
+@app.command(help="模块4 测量精度验证(系统漂移体检):消费冻结标定产物(output/ 下的两路 "
+                  "intrinsics.json + extrinsics_stereo.json,绝不重拟合)→ 对 validation.data_dir "
+                  "同步图像对走既有检测链 → 冻结/逐对双模式测棋盘对角距离 → 区域精度分布 → "
+                  "判定闸门(超红线 verdict=FAIL,退出码 1,fail-closed)→ validation.json + "
+                  "report.md 落盘。")
+def validate() -> None:
+    """模块4 命令入口:坏输入收口为中文一句 + 退出码 1,不吐堆栈。"""
+    try:
+        # 局部导入:让 --help 不依赖 validation 模块,加快启动
+        from stereo_calib.validation.pipeline import run_validation
+
+        rep = run_validation(load_config(_config_path))
+    except (ValueError, OSError, ArithmeticError, RuntimeError,
+            AssertionError, cv2.error) as e:
+        # 数值路径异常家族(含 DLT/牛顿逆/PnP 的数值失败与 OpenCV 报错)与
+        # 坏输入同样收口为中文一句,绝不吐堆栈;单对失败已在编排层降级留痕,
+        # 这里兜最外层的底。
+        typer.echo(f"测量精度验证失败:{e}")
+        typer.echo("  请检查 config.yaml 配置与冻结标定产物(output/ 下的 intrinsics.json "
+                   "与 extrinsics_stereo.json)及 validation.data_dir 图像对,修正后重跑 "
+                   "stereo-calib validate。")
+        raise typer.Exit(code=1) from e
+    # FAIL 结论转退出码 1(fail-closed,与体检防线同风格)——必须在 try 之外:
+    # typer.Exit 不是异常网家族成员,但要保证它不被收口逻辑改写语义。
+    if rep["verdict"] == "FAIL":
+        typer.echo("测量精度验证判定 FAIL(冻结模式测量偏差超红线):以退出码 1 上报。")
+        raise typer.Exit(code=1)
 
 
 def main() -> None:
