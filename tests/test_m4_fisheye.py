@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 import pytest
 from scipy.optimize._numdiff import approx_derivative
+from test_intrinsic_config import _mutate, _write_config
 
 from stereo_calib.intrinsic import models
 from stereo_calib.intrinsic.artifacts import write_intrinsics_json
@@ -49,7 +50,6 @@ from stereo_calib.stereo.observation import (
     solve_view_pose,
 )
 from stereo_calib.stereo.solve import solve_stereo
-from test_intrinsic_config import MINIMAL_YAML, _mutate, _write_config
 
 # M4 真值:~180° 对角视场的鱼眼(fx = 画面半对角 /(π/2)),畸变取常见量级
 _PARAMS_M4_TRUE = np.array([467.0, 466.0, 640.0, 360.0,
@@ -200,7 +200,7 @@ def test_m4_solve_opencv_noisy_data_hits_noise_floor():
 def test_m4_multistart_grid_runs_and_records_starts():
     """强制铺 K×D 网格时:允许单个种子失败、必须真的多次起步并给出有限解。"""
     objp, uvs = _synth_fisheye_views(_PARAMS_M4_TRUE, n_views=18, seed=9, noise_px=0.2)
-    import stereo_calib.intrinsic.solve as S   # 只在本用例里改门限,跑完必须还原
+    import stereo_calib.intrinsic.solve as S  # 只在本用例里改门限,跑完必须还原
     old = S._FISHEYE_MULTISTART_TRIGGER
     S._FISHEYE_MULTISTART_TRIGGER = 0.0
     try:

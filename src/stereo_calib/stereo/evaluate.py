@@ -203,8 +203,6 @@ def disambiguate_frame(uv1: np.ndarray, uv2: np.ndarray, objp: np.ndarray,
             f"单帧观测形状不合:期望 uv1/uv2 各 (角点数,2),实际是 "
             f"{uv1_arr.shape} / {uv2_arr.shape}。评估链一次处理一个双目对。")
 
-    k1 = np.asarray(intr1.K, dtype=np.float64)
-    d1 = np.asarray(intr1.D, dtype=np.float64).ravel()
     R_rel_arr = np.asarray(R_rel, dtype=np.float64)
     t_rel_arr = np.asarray(t_rel, dtype=np.float64).ravel()
 
