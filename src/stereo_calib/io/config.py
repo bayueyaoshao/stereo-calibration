@@ -31,9 +31,11 @@ _ALLOWED_REFINE_METHODS = {"trf"}
 # fc_prior = fc + Tikhonov 先验(f/c 相对偏差);full_prior = 全内参放开 + 先验
 _ALLOWED_JOINT_VARIANTS = {"fc", "fc_prior", "full_prior"}
 
-# 畸变模型白名单(2026-10-24 增补):M2 = 五参 Brown-Conrady(legacy);
-# M8 = rational 8(本相机实测充分,体检对照),布局见 intrinsic.models
-_ALLOWED_DISTORTION_MODELS = {"M2", "M8"}
+# 畸变模型白名单(2026-10-24 增补 M8,2026-10-26 增补 M4):
+# M2 = 五参 Brown-Conrady(legacy);M8 = rational 8(本相机实测充分);
+# M4 = 鱼眼等距 KB4(cv2.fisheye 同族,8 参),用于后续鱼眼双目;布局统一
+# 见 intrinsic.models(INTRINSIC_NAMES_M2/M8/M4,按长度一一对应,禁止按位置猜)
+_ALLOWED_DISTORTION_MODELS = {"M2", "M8", "M4"}
 
 
 @dataclass(frozen=True)
@@ -159,8 +161,10 @@ class IntrinsicConfig:
     """模块2 内参标定段:畸变模型 / 精化 / 离群剔除 / test 阈值 / 手动剔除清单。
 
     distortion_model 选畸变布局("M2" 五参 Brown-Conrady,legacy;
-    "M8" rational 8——本相机 8mm C-mount 4MP 实测充分,2026-10-24 增补),
-    默认 "M2" 保持旧配置行为零改动。
+    "M8" rational 8——本相机 8mm C-mount 4MP 实测充分,2026-10-24 增补;
+    "M4" 鱼眼等距 KB4——8 参 cv2.fisheye 同族,2026-10-26 增补,走另一条
+    求解路线(见 intrinsic.solve._solve_opencv_m4)),
+    默认 "M2" 保持旧配置行为零改动。生产当前用 "M8"。
     """
 
     distortion_model: str = "M2"
@@ -572,7 +576,7 @@ def _parse_intrinsic(raw: dict) -> IntrinsicConfig:
     if not isinstance(model, str) or model not in _ALLOWED_DISTORTION_MODELS:
         _fail("intrinsic.distortion_model", model,
               f"只能是 {' 或 '.join(sorted(_ALLOWED_DISTORTION_MODELS))}"
-              f"(M2=五参 Brown-Conrady legacy;M8=rational 8)")
+              f"(M2=五参 Brown-Conrady legacy;M8=rational 8;M4=鱼眼 KB4)")
 
     rms_test_max = section.get("rms_test_max", IntrinsicConfig.rms_test_max)
     if (not isinstance(rms_test_max, int | float) or isinstance(rms_test_max, bool)

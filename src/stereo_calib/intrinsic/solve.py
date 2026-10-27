@@ -47,6 +47,7 @@ from scipy.optimize import least_squares
 from scipy.sparse import coo_matrix, csr_matrix
 
 from stereo_calib.intrinsic import models
+from stereo_calib.intrinsic.metrics import compute_metrics
 from stereo_calib.io.config import RefineConfig
 
 # 求解器自身的视图数底线:两三个视角定不了内参(装载层 min_views 默认 10,
@@ -57,6 +58,19 @@ _MIN_SOLVE_VIEWS = 2
 _TAIL_WINDOW = 10
 # 尾部改进的"走平"判定线:相对改进小于它就认为代价不再下降
 _PLATEAU_TOL = 1e-6
+
+# ---- M4(cv2.fisheye.calibrate)专用常量 --------------------------------------
+# flags:CALIB_RECOMPUTE_EXTRINSIC(=2)每轮迭代重算位姿(不带它有假收敛);
+#        CALIB_FIX_SKEW(=8)把 skew 锁 0——M4 参数表里本就没有 skew,数学层
+#        投影也恒为 0,放开它等于让 OpenCV 白调一个不影响结果的自由度
+#        (与参考工程 kb4 适配器的 flags 逐位一致)。
+_FISHEYE_FLAGS = int(cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW)
+# 停止条件( errno 实测默认:迭代上限 100、收敛容差 1e-6)
+_FISHEYE_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+# 多起步触发门限:单起步(float64 回代 RMS)高于它就说明可能卡进了坏盆地,
+# 才升级到多起步——好数据一次就过、零额外算力(与参考工程 opencv 后端的
+# 同类门控同思路)。
+_FISHEYE_MULTISTART_TRIGGER = 0.5
 
 
 @dataclass(frozen=True)
@@ -124,7 +138,14 @@ def _unpack_opencv_solution(model: str, names, K, D, rvecs, tvecs,
     (单一解包纪律:断言只此一份,两遍解防不了布局陷阱等于没防)。
     """
     D = np.asarray(D, dtype=np.float64).ravel()
-    if model == "M2":
+    if model == "M4":
+        # 鱼眼解包:D 恰 4 长 [k1,k2,k3,k4](θ 多项式系数),语义与针孔族
+        # 完全不同,长度不对必须当场拦——喂给针孔路径会被解释成
+        # [k1,k2,p1,p2] 且不报错(静默错是这里唯一的可怕结局)。
+        assert D.shape == (4,), (
+            f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (4,)(M4 鱼眼布局 "
+            f"{names})。出现此错说明走的不是 cv2.fisheye.calibrate,请核查。")
+    elif model == "M2":
         assert D.shape == (5,), (
             f"OpenCV 解包的畸变向量长度是 {D.shape},期望 (5,)(M2 布局 {names})。"
             f"出现此错说明求解调用被改动,请对照参考工程核查。")
@@ -174,6 +195,191 @@ def _solve_opencv_m8_pass2(objs32, imgs32, size, K1: np.ndarray, D1: np.ndarray,
     return rms2, K2, D2, rvecs2, tvecs2, flags2
 
 
+# ---------------------------------------------------------------------------
+# M4(鱼眼 KB4)的 OpenCV 初值:多起步自运用 PINHOLE 自举(2026-10-26 增补)
+# ---------------------------------------------------------------------------
+
+def _fisheye_tan_seed(theta_max: float) -> np.ndarray:
+    """把 θd(θ) 拟成 tanθ 的最小二乘 k 系数(让 M4 先站在「近似针孔」处)。
+
+    白话:同一台相机若其实是近针孔,k 全 0 起步离真相很远( pinhole 模型的
+    像素半径 ∝ tanθ,鱼眼模型的 ∝ θd)。这里我们只要解线性方程
+    θ + k1θ³ + k2θ⁵ + k3θ⁷ + k4θ⁹ ≈ tanθ 就能拿到一组「站在针孔附近」的
+    种子,纯解析、无任何外部标定结果输入。
+    """
+    th = np.linspace(1e-3, float(theta_max), 200)
+    basis = np.stack([th**3, th**5, th**7, th**9], axis=1)
+    target = np.tan(th) - th
+    coef, *_ = np.linalg.lstsq(basis, target, rcond=None)
+    return np.asarray(coef, dtype=np.float64)
+
+
+def _fisheye_k_seeds() -> list[np.ndarray]:
+    """M4 的畸变初值候选(第 0 项零初值 = 原单起步行为)。
+
+    三档:零 → tan 拟合族(覆盖不同视场上限,θmax 越大越广角)→ 鱼眼式大
+    k1 扫(正负两向)。全部由本文件的解析式直接产生,既不读外部标定结果
+    也不塞魔数 patch(工程自包含纪律)。
+    """
+    seeds: list[np.ndarray] = [np.zeros(4, dtype=np.float64)]
+    for theta_max in (0.35, 0.6, 0.9, 1.2):
+        seeds.append(_fisheye_tan_seed(theta_max))
+    for m in (-0.5, -0.3, 0.3, 0.6, 1.0):
+        seeds.append(np.array([m, 0.0, 0.0, 0.0], dtype=np.float64))
+    return seeds
+
+
+def _fisheye_focal_guesses(image_size: tuple[int, int],
+                           pinhole_fx: float | None) -> list[np.ndarray]:
+    """M4 的 K 初值候选清单:等距约定 + 若干典型视场 + (可选)自家针孔 f。
+
+    pinhole_fx 来自**本工程自己**在同一批观测上的针孔解(solve_opencv 的
+    pinhole 路径),不是外部产物——正因为是「自家解」的自举,才既能拿到靠谱
+    的焦距量级,又不违反自包含纪律(外部 K 作初值只是藏住脆弱性,换相机仍崩)。
+    """
+    width, height = int(image_size[0]), int(image_size[1])
+    guesses: list[np.ndarray] = []
+    seen: list[float] = []
+
+    def _push(fx: float) -> None:
+        if fx <= 0.0 or any(abs(fx - got) < 1e-6 * max(got, 1.0) for got in seen):
+            return
+        seen.append(float(fx))
+        g = np.eye(3, dtype=np.float64)
+        g[0, 0] = g[1, 1] = float(fx)
+        g[0, 2] = width / 2.0
+        g[1, 2] = height / 2.0
+        guesses.append(g)
+
+    # 等距鱼眼约定:180° 视场正好铺满最长边
+    _push(max(width, height) / np.pi)
+    # 若干典型水平视场(60°/90°/120°/150°):f = (w/2)/tan(hfov/2)
+    for hfov_deg in (150.0, 120.0, 90.0, 60.0):
+        _push((width / 2.0) / np.tan(np.deg2rad(hfov_deg) / 2.0))
+    if pinhole_fx is not None:     # 自家针孔解自举(本工程产物,非外部结果)
+        _push(float(pinhole_fx))
+    return guesses
+
+
+def _fisheye_bootstrap_focal_theta(uvs_arr: np.ndarray, objp_arr: np.ndarray,
+                                   image_size: tuple[int, int],
+                                   image_size_note: str) -> tuple[float | None, float | None]:
+    """用**自家**针孔解先估一次焦距与视场量级,给鱼眼多起步当种子。
+
+    返回 (自家针孔 fx, 画面最大入射角估计 θmax);任一步失败返回 (None, None)
+    ——自举只是「有则用」,绝不因它失败而中断标定。
+    """
+    try:
+        pin = solve_opencv(uvs_arr, objp_arr, image_size, "M8")
+    except (ValueError, ArithmeticError, RuntimeError, AssertionError, cv2.error):
+        return None, None
+    fx = float(pin.params[0])
+    width, height = int(image_size[0]), int(image_size[1])
+    corners = np.array([[0.0, 0.0], [width, 0.0], [0.0, height], [width, height]],
+                       dtype=np.float64)
+    try:
+        rays = models.unproject(corners, pin.params)
+    except (ValueError, ArithmeticError, AssertionError):
+        return fx, None
+    theta = np.arctan2(np.hypot(rays[:, 0], rays[:, 1]), rays[:, 2])
+    return fx, float(theta.max())
+
+
+def _run_fisheye_once(objs, imgs, size: tuple[int, int], K_guess: np.ndarray,
+                      D_seed: np.ndarray):
+    """单次 cv2.fisheye.calibrate(K/D 初值 copy 后传入,防 OpenCV 就地改写)。"""
+    return cv2.fisheye.calibrate(
+        objs, imgs, tuple(size), K_guess.copy(), D_seed.copy().reshape(4, 1),
+        flags=_FISHEYE_FLAGS, criteria=_FISHEYE_CRITERIA)
+
+
+def _solve_opencv_m4(uvs_arr: np.ndarray, objp_arr: np.ndarray,
+                     size: tuple[int, int], n_views: int) -> SolveResult:
+    """M4 初值路径:cv2.fisheye.calibrate(float64 + (N,1,x) 形状) + 多起步择优。
+
+    为什么必须多起步(用户 2026-10-26 裁决 + 本工程的既有教训):cv2 鱼眼
+    求解器对「非鱼眼数据」或「强畸变数据」极易落进 fx 被撑大/缩小的退化盆
+    地,单起步拼运气。**多起步**是让本工程自行落到好盆地的正道;引入外部
+    K/dist 作初值只是藏住脆弱性。
+
+    择优用**自家 float64 回代 RMS**(compute_metrics,Pitfall 12:OpenCV 的
+    rms 是 float32 口径,只留 solver_meta 对账),不是 OpenCV 返回值。
+
+    初值候选 = K 猜值清单 × 畸变种子清单。**每次拟合失败都不是全局失败**:
+    强畸变数据下 OpenCV 鱼眼求解器常在某些种子上报内部断言( InitExtrinsics
+    类),正是要靠别的种子救回来;只有**全部候选都失败**才允许抛错。数据本
+    就好时第一次起步即过闸门,只拟合一次(与 pinhole 路径一样便宜)。
+    """
+    n_points = objp_arr.shape[0]
+    # fisheye 系函数既不收 float32(与 calibrateCamera 不同)也不收 (N,x):
+    # 形状固定 (N,1,3)/(N,1,2)、dtype 固定 float64(参考实测行为)。
+    objs = [objp_arr.astype(np.float64).reshape(n_points, 1, 3) for _ in range(n_views)]
+    imgs = [uv.astype(np.float64).reshape(n_points, 1, 2) for uv in uvs_arr]
+
+    pinhole_fx, theta_max = _fisheye_bootstrap_focal_theta(uvs_arr, objp_arr, size, size)
+    k_guesses = _fisheye_focal_guesses(size, pinhole_fx)
+    seeds = _fisheye_k_seeds()
+    if theta_max is not None and theta_max > 0.0:      # 自家解给出的视场 → 多一份量身种子
+        seeds = seeds + [_fisheye_tan_seed(theta_max)]
+
+    names = models.intrinsic_names("M4")
+
+    def _pack(rms, K_out, D_out, rvecs, tvecs):
+        params, rvecs_arr, tvecs_arr = _unpack_opencv_solution(
+            "M4", names, K_out, D_out, rvecs, tvecs, n_views)
+        scored = compute_metrics(objp_arr, uvs_arr, params, rvecs_arr, tvecs_arr)
+        return (scored.rms_overall, params, rvecs_arr, tvecs_arr, float(rms))
+
+    # 第 1 步:与原 pinhole 路径同价的那一次起步(零畸变 + 等距约定焦距)。
+    best = None
+    n_starts = 0
+    last_error: Exception | None = None
+    try:
+        best = _pack(*_run_fisheye_once(objs, imgs, size, k_guesses[0], seeds[0]))
+        n_starts = 1
+    except (cv2.error, ValueError, ArithmeticError, AssertionError) as e:
+        last_error = e   # 单起步炸 ≠ 全局失败:正是多起步要救的那一类数据
+
+    # 第 2 步:首次起步没出结果,或出了但疑似坏盆地(回代 RMS 超门限)→
+    # 铺 K×D 网格逐一起步,单次失败照许(记录最后一个错备用);同一把
+    # float64 尺比对择优。
+    multistart = best is None or best[0] > _FISHEYE_MULTISTART_TRIGGER
+    if multistart:
+        first_tried = n_starts >= 1                 # 首步成功过就不再重跑同一对
+        for k_idx, k_guess in enumerate(k_guesses):
+            for s_idx, seed in enumerate(seeds):
+                if first_tried and k_idx == 0 and s_idx == 0:
+                    continue
+                try:
+                    cand = _pack(*_run_fisheye_once(objs, imgs, size, k_guess, seed))
+                except (cv2.error, ValueError, ArithmeticError, AssertionError) as e:
+                    last_error = e                 # 个别种子病态是常态,继续
+                    continue
+                n_starts += 1
+                if best is None or cand[0] < best[0]:
+                    best = cand
+
+    if best is None:
+        raise ValueError(
+            f"OpenCV 鱼眼标定求解失败:{n_views} 个视图,image_size={size},"
+            f"{n_starts} 次起步全部失败,最后一次 OpenCV 报错——{last_error}。"
+            f"鱼眼模型对数据分布很挑(需要跨视场的大角度覆盖),请检查是否为"
+            f"鱼眼数据、视图朝向是否足够分散。"
+        ) from last_error
+
+    rms_scored, params, rvecs_arr, tvecs_arr, opencv_rms = best
+    if not np.isfinite(params).all():
+        raise ValueError(
+            f"OpenCV 鱼眼标定未产出有限数值:{n_views} 个视图,image_size={size}。"
+            f"全部 {n_starts} 个起步都落进了病态解,多半是数据不是鱼眼/视场覆盖不足。")
+    return SolveResult(
+        params=params, rvecs=rvecs_arr, tvecs=tvecs_arr, solver="opencv",
+        solver_meta={"path": "fisheye.calibrate", "flags_used": int(_FISHEYE_FLAGS),
+                     "distortion_model": "M4", "opencv_rms": opencv_rms,
+                     "n_starts": n_starts, "multistart": multistart,
+                     "rms_float64": float(rms_scored)})
+
+
 def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
     """OpenCV 初值路径:按配置的畸变模型一次估全畸变,返回"初值版"标定结果。
 
@@ -192,10 +398,12 @@ def solve_opencv(uvs, objp, image_size, model: str = "M2") -> SolveResult:
         model:      "M2" | "M8"(布局见 models.intrinsic_names,默认 M2)。
     """
     names = models.intrinsic_names(model)
-    flags = cv2.CALIB_RATIONAL_MODEL if model == "M8" else 0
     uvs_arr, objp_arr, size = _check_common_inputs(uvs, objp, image_size)
     n_views = uvs_arr.shape[0]
     n_points = uvs_arr.shape[1]
+    if model == "M4":      # 鱼眼走另一条初值路线(fisheye.calibrate + 多起步)
+        return _solve_opencv_m4(uvs_arr, objp_arr, size, n_views)
+    flags = cv2.CALIB_RATIONAL_MODEL if model == "M8" else 0
     if n_views < _MIN_SOLVE_VIEWS:
         raise ValueError(
             f"视图数不足以标定:只给了 {n_views} 个视图(下限 {_MIN_SOLVE_VIEWS}),"
@@ -252,15 +460,16 @@ def row_index(view: int, point: int, uv_axis: int, n_points: int) -> int:
 def pack_theta(params: np.ndarray, rvecs: np.ndarray, tvecs: np.ndarray) -> np.ndarray:
     """内参 + 逐视图位姿 → 联合单向量 θ = [内参 | 视图 0 的 (ω,t) 6 个 | …]。
 
-    内参块长度按布局分派(M2 九参 / M8 十二参);θ 总长对 6 取模的余数
-    即布局指纹(M2 ≡3、M8 ≡0),unpack_theta 按它无损解箱。不做"内参/
-    外参分块交替优化"——那等于自研优化器,收敛性质更差且实测收益为零
-    (Don't Hand-Roll)。V 视图 → 9/12 + 6V 维 float64。
+    内参块长度按布局分派(M4 八参 / M2 九参 / M8 十二参);θ 总长对 6 取模的
+    余数即布局指纹(M2 ≡3、M4 ≡2、M8 ≡0,三者互不相同),unpack_theta 按它
+    无损解箱。不做"内参/外参分块交替优化"——那等于自研优化器,收敛性质更差
+    且实测收益为零(Don't Hand-Roll)。V 视图 → 8/9/12 + 6V 维 float64。
     """
     arr = np.asarray(params, dtype=np.float64).ravel()
-    if arr.shape[0] not in (9, 12):
+    if arr.shape[0] not in (8, 9, 12):
         raise AssertionError(
-            f"参数向量形状不合:期望 (9,)(布局 {models.INTRINSIC_NAMES_M2})或 "
+            f"参数向量形状不合:期望 (8,)(布局 {models.INTRINSIC_NAMES_M4})、"
+            f"(9,)(布局 {models.INTRINSIC_NAMES_M2})或 "
             f"(12,)(布局 {models.INTRINSIC_NAMES_M8}),实际拍平后是 {arr.shape}。"
             f"请按 intrinsic_names(模型名) 的顺序传参,不要按位置猜。"
         )
@@ -280,26 +489,29 @@ def pack_theta(params: np.ndarray, rvecs: np.ndarray, tvecs: np.ndarray) -> np.n
 def unpack_theta(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """θ (9/12+6V,) → (params (9,)/(12,), rvecs (V,3), tvecs (V,3));与 pack_theta 互逆。
 
-    内参块长度按 θ 对 6 取模的余数无损分派(9+6V ≡ 3、12+6V ≡ 0 (mod 6));
+    内参块长度按 θ 对 6 取模的余数无损分派(8+6V ≡ 2、9+6V ≡ 3、
+    12+6V ≡ 0 (mod 6)——三种布局余数互不相同);
     长度对不上任何布局/视图数时直接中文报错——装箱与解箱必须同一布局,
     错位在这里点名,不带病进优化器。
     """
     th = np.asarray(theta, dtype=np.float64).ravel()
     remainder = th.shape[0] % 6
-    if remainder == 3:
+    if remainder == 2:
+        n_params = 8    # M4 布局:8 + 6×视图数
+    elif remainder == 3:
         n_params = 9    # M2 布局:9 + 6×视图数
     elif remainder == 0:
         n_params = 12   # M8 布局:12 + 6×视图数
     else:
         raise AssertionError(
             f"θ 向量长度不合:长度 {th.shape[0]} 对不上任何布局"
-            f"(M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
+            f"(M4:内参 8+6×视图数;M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
             f"请检查 θ 是否由 pack_theta 按同一布局装出。"
         )
     if th.shape[0] < n_params + 6:
         raise AssertionError(
             f"θ 向量长度不合:长度 {th.shape[0]} 对不上任何布局"
-            f"(M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
+            f"(M4:内参 8+6×视图数;M2:内参 9+6×视图数;M8:内参 12+6×视图数)。"
             f"请检查 θ 是否由 pack_theta 按同一布局装出。"
         )
     n_views = (th.shape[0] - n_params) // 6
@@ -438,10 +650,10 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
                  model: str = "M2") -> SolveResult:
     """scipy 精化路径:OpenCV 初值 → 稀疏最小二乘联合精化(INTR-01)。
 
-    白话:θ = [内参(按 model 布局 9/12)| 每视图 6 个位姿参数] 装成
+    白话:θ = [内参(按 model 布局 8/9/12)| 每视图 6 个位姿参数] 装成
     **一个**向量,交给 least_squares 的 trf(信赖域反射法)+ lsmr(解稀疏
     线性子问题)+ 解析稀疏雅可比联合优化;不做内参/外参分块交替优化
-    (Don't Hand-Roll)。
+    (Don't Hand-Roll)。三个模型走同一段代码,差异只在雅可比列数。
 
     失败契约:非收敛**不抛异常**——判定依据全进 solver_meta(T-02-05
     不静默),由编排层消费 converged 标志决定后续;数值路径异常
@@ -454,7 +666,7 @@ def refine_scipy(uvs, objp, image_size, init: SolveResult, refine_cfg: RefineCon
         uvs / objp / image_size:与 solve_opencv 同一口径;
         init:       OpenCV 初值解(必须与 uvs 视图数一致);
         refine_cfg: 精化开关 + method + max_nfev + 容差,全部配置控制;
-        model:      "M2" | "M8"(布局见 models.intrinsic_names,默认 M2)。
+        model:      "M2" | "M8" | "M4"(布局见 models.intrinsic_names,默认 M2)。
     """
     names = models.intrinsic_names(model)
     uvs_arr, objp_arr, size = _check_common_inputs(uvs, objp, image_size)

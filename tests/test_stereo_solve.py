@@ -176,12 +176,19 @@ def test_solve_source_guards_task1():
     (自伤规避体例,照 test_intrinsic_solve.py)。
     """
     source = _SOLVE_SOURCE.read_text(encoding="utf-8")
+    # 逐帧 PnP 的唯一住址(2026-10-26 起):M2/M8 喂带畸变原始像素、M4 鱼眼走
+    # 自家精确反投影 + 切平面坐标,分派逻辑不能住在多份调用处,故这两条"装包
+    # 形态"防线改查该住址——检查点跟随改动,强度不降。
+    helper = _SOLVE_SOURCE.parent.joinpath("observation.py").read_text(encoding="utf-8")
     assert source.count("_distort") == 0, (
         "solve.py 出现畸变核符号:投影/畸变公式只准经 intrinsic.models(单一数学源)")
     assert "relative_pose" in source, "相对位姿必须唯一实现(cam1→cam2 方向语义)"
-    assert "SOLVEPNP_ITERATIVE" in source, "solvePnP 必须走迭代法(带畸变原始像素输入)"
+    assert "solve_view_pose" in source, (
+        "逐帧 PnP 必须经 observation.solve_view_pose(按模型分派的唯一住址),"
+        "不得在 solve.py 里各自拼 OpenCV 调用")
+    assert "SOLVEPNP_ITERATIVE" in helper, "solvePnP 必须走迭代法(带畸变原始像素输入)"
     assert "np.median" in source, "初值聚合必须是中位数(对翻转帧/孪生解鲁棒)"
-    assert "astype(np.float32)" in source, (
+    assert "astype(np.float32)" in helper, (
         "solvePnP 装包必须显式降 float32(绑定层 dtype 陷阱,Pitfall 7)")
     assert "median_spread" in source, "离散度防线阈值必须来自配置参数"
 

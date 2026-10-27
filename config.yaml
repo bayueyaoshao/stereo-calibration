@@ -53,7 +53,11 @@ intrinsic:
   distortion_model: "M8"               # 畸变模型布局:M2 = 五参 Brown-Conrady(legacy,
                                        # 本相机实测欠拟合——体检 fail-closed 拦截的根因);
                                        # M8 = rational 8(D=[k1,k2,p1,p2,k3,k4,k5,k6],
-                                       # 2026-10-24 增补,本相机实测充分)
+                                       # 2026-10-24 增补,本相机实测充分);
+                                       # M4 = 鱼眼等距 KB4(D=[k1,k2,k3,k4],params 8 参,
+                                       # 2026-10-26 增补,走 cv2.fisheye.calibrate 路
+                                       # 线 + 多起步;仅用于真鱼眼/超广角相机,当前
+                                       # 这两台 8mm C-mount 请保持 M8)
   refine:
     enabled: true                      # OpenCV 初值之后是否做 scipy 联合精化(算法开关全部配置控制)
     method: "trf"                      # least_squares 求解方法,只收 trf('lm' 只支持稠密雅可比,拒收防呆)
