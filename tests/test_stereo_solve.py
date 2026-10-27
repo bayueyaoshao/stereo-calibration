@@ -449,8 +449,13 @@ def test_real_data_stereo_engine_acceptance():
         f"量级灾难(参考实录:内建双目例程在该机型把它标到 2500mm)")
     assert result.rotation_angle_deg < 90.0, (
         f"转角 {result.rotation_angle_deg:.3f}° 应 < 90°(刚架两相机近同向)")
-    assert result.per_pair_rms.shape == (len(pairs.image_ids),)
-    assert np.isfinite(result.per_pair_rms).all(), "全部对必须幸存(逐对 RMS 有限)"
+    # 2026-10-26 起引擎自适应软剔除:终解对齐幸存子集,被剔对进 auto_dropped 留痕
+    auto_dropped = result.flip_log["train"].get("auto_dropped", [])
+    n_surviving = len(pairs.image_ids) - len(auto_dropped)
+    assert result.per_pair_rms.shape == (n_surviving,), (
+        f"逐对 RMS 必须对齐软剔除后的幸存对(原始 {len(pairs.image_ids)} − "
+        f"auto_dropped {len(auto_dropped)} = {n_surviving})")
+    assert np.isfinite(result.per_pair_rms).all(), "幸存对逐对 RMS 必须全有限"
     assert result.solver_meta["converged"] is True, (
         "外参精化必须收敛(生产配置 refine 开,T-03-06 收敛判定不静默)")
 

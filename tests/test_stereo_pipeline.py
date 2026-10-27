@@ -411,8 +411,10 @@ def test_extrinsics_stereo_json_roundtrip_full_contract(tmp_path):
     assert payload["true_distance_mm"] == pytest.approx(305.16389039334257, abs=1e-9)
     assert payload["dropped_pairs"] == [
         {"group_id": "g_bad", "rms": 3.2, "round": 1, "threshold": 1.5}]
-    assert payload["flip_log"]["train"] == {"pass2_flipped": 1, "pairs": ["g_flip"]}
-    assert payload["flip_log"]["test"] == {"pass2_flipped": 0, "pairs": []}
+    assert payload["flip_log"]["train"] == {
+        "pass2_flipped": 1, "pairs": ["g_flip"], "auto_dropped": []}
+    assert payload["flip_log"]["test"] == {
+        "pass2_flipped": 0, "pairs": [], "auto_dropped": []}
     assert np.asarray(payload["D1"]).shape == (5,), "D 快照必须保持 OpenCV 5 长布局"
 
 
@@ -780,7 +782,7 @@ def test_run_stereo_outlier_rejection_and_test_marking(tmp_path, monkeypatch):
     assert "仅标记" in cols[7], "test 坏帧必须在 note 留标记"
     flip = payload["flip_log"]
     assert set(flip) == {"train", "test"}
-    assert set(flip["train"]) == {"pass2_flipped", "pairs"}
+    assert set(flip["train"]) == {"pass2_flipped", "pairs", "auto_dropped"}
     assert flip["test"]["pass2_flipped"] == 0, "消歧不该翻干净序(污染是散斑不是翻转)"
 
 
